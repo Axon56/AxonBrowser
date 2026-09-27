@@ -5,7 +5,7 @@ use crate::{
         actions::{click::click_target_node, context},
         page::root::PageScope,
     },
-    window,
+    live_access, window,
 };
 
 use super::{physical, target::PageActionTarget};
@@ -35,45 +35,29 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
     }
 
     let role = target.node.role.clone();
-    let focus_summary = if physical::looks_like_text_input(&role) {
-        match physical::mouse_click_target(&target).await {
-            Ok(summary) => summary,
-            Err(err) => format!(
-                "focused {} via selector fallback (physical click unavailable: {})",
-                target.label, err
+    let focus_summary = focus_for_typing(&target, &role).await?;
+
+    // AT-SPI editable text needs no coordinates at all, so it is the first
+    // choice for inputs and comboboxes.
+    if target.try_set_text(text).await? && text_landed(&target, text).await {
+        return Ok(attach_notes(
+            format!(
+                "typed into {} via AT-SPI editable text ({}) | {}",
+                target.label, target.path, focus_summary
             ),
-        }
-    } else if target.try_grab_focus().await? {
-        format!("focused {} via AT-SPI grab-focus", target.label)
-    } else {
-        click_target_node(&target.node, &target.label, &target.path).await?
-    };
+            &notes,
+        ));
+    }
 
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
 
-    let input_mode = if physical::looks_like_text_input(&role) {
-        let _ = window::send_key_active("ctrl+a");
-        let _ = window::send_key_active("BackSpace");
-        window::type_text_active(text)?;
-        "active-window X11 key injection"
-    } else {
-        if target.try_set_text(text).await? {
-            return Ok(attach_notes(
-                format!(
-                    "typed into {} via AT-SPI editable text ({}) | {}",
-                    target.label, target.path, focus_summary
-                ),
-                &notes,
-            ));
-        }
-        context::copy_to_clipboard(text)?;
-        let _ = window::send_key_active("ctrl+a");
-        let _ = window::send_key_active("BackSpace");
-        window::send_key_active("ctrl+v")?;
-        "window-targeted clipboard paste"
-    };
-    window::settle_after_input().await;
+    let mut input_mode = deliver_text(&role, text).await?;
+    // Verify the value landed; retry the step once instead of marching on.
+    if !text_landed(&target, text).await {
+        input_mode = deliver_text(&role, text).await?;
+        notes.push("retried after the value did not verify".to_string());
+    }
 
     Ok(attach_notes(
         format!(
@@ -87,6 +71,55 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
         ),
         &notes,
     ))
+}
+
+/// Focus a field for typing, asking the accessibility tree first so inputs and
+/// comboboxes are reached by keyboard rather than by a coordinate click.
+async fn focus_for_typing(target: &PageActionTarget, role: &str) -> Result<String> {
+    if target.try_grab_focus().await? {
+        return Ok(format!("focused {} via AT-SPI grab-focus", target.label));
+    }
+
+    if physical::looks_like_text_input(role)
+        && let Ok(summary) = physical::mouse_click_target(target).await
+    {
+        return Ok(summary);
+    }
+
+    // Last resort: the accessibility action interface, which needs no extents.
+    click_target_node(&target.node, &target.label, &target.path).await
+}
+
+/// Deliver text with the keyboard, returning a label for the mode used.
+async fn deliver_text(role: &str, text: &str) -> Result<&'static str> {
+    if physical::looks_like_text_input(role) {
+        let _ = window::send_key_active("ctrl+a");
+        let _ = window::send_key_active("BackSpace");
+        window::type_text_active(text)?;
+        window::settle_after_input().await;
+        Ok("active-window X11 key injection")
+    } else {
+        context::copy_to_clipboard(text)?;
+        let _ = window::send_key_active("ctrl+a");
+        let _ = window::send_key_active("BackSpace");
+        window::send_key_active("ctrl+v")?;
+        window::settle_after_input().await;
+        Ok("window-targeted clipboard paste")
+    }
+}
+
+/// Confirm the typed value actually landed.
+async fn text_landed(target: &PageActionTarget, expected: &str) -> bool {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return true;
+    }
+
+    matches!(live_access::read_text(&target.node).await, Ok(Some(value)) if value.contains(expected))
+        || matches!(
+            crate::inspect::node_text(&target.node).await,
+            Some(value) if value.contains(expected)
+        )
 }
 
 fn attach_notes(summary: String, notes: &[String]) -> String {

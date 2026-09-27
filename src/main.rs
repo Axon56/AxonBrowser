@@ -8,6 +8,7 @@ mod inspect;
 mod install;
 mod live_access;
 mod model;
+mod overlay;
 mod render;
 mod runtime;
 mod selector;

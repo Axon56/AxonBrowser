@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 use crate::{
     firefox::{actions::click::click_target_node, page::root::PageScope},
-    selector,
+    selector, window,
 };
 
 use super::target::PageActionTarget;
@@ -30,6 +30,29 @@ pub async fn select_option(
         notes.push("scrolled into view first".to_string());
     }
 
+    // Keyboard-first, but only for controls that accept typed text: custom
+    // comboboxes and autocompletes usually expose no press action, while a
+    // native select exposes a menu that the click path below already handles.
+    if target.try_grab_focus().await? && target.try_set_text(option).await? {
+        let browser_window = target.browser_window().await?;
+        let activation_note =
+            crate::firefox::actions::context::activate_window_note(&browser_window.id);
+        window::send_key_active("Return")?;
+        window::settle_after_input().await;
+
+        if option_selected(&target, option).await {
+            return Ok(attach_notes(
+                format!(
+                    "selected option {:?} via keyboard entry in window {} ({})",
+                    option, browser_window.id, activation_note
+                ),
+                &notes,
+            ));
+        }
+        notes.push("keyboard entry did not verify; fell back to the option list".to_string());
+    }
+
+    // Fall back to opening the control and clicking the option, then verify.
     let open_summary = click_target_node(&target.node, &target.label, &target.path).await?;
     let option_selector = selector::Selector::parse(&format!("~{}", option))?;
     let option_node = crate::firefox::page::root::resolve_in_page_scope(scope, &[option_selector])
@@ -41,6 +64,10 @@ pub async fn select_option(
     let option_path = option_node.path.join(" > ");
     let select_summary = click_target_node(&option_node, &option_label, &option_path).await?;
 
+    if !option_selected(&target, option).await {
+        notes.push("selection did not verify after clicking the option".to_string());
+    }
+
     Ok(attach_notes(
         format!(
             "selected option {:?} via {} | {}",
@@ -48,6 +75,22 @@ pub async fn select_option(
         ),
         &notes,
     ))
+}
+
+/// Confirm the control now reports the option as its value.
+async fn option_selected(target: &PageActionTarget, option: &str) -> bool {
+    let option = option.trim().to_ascii_lowercase();
+    if option.is_empty() {
+        return true;
+    }
+
+    if let Ok(Some(value)) = crate::live_access::read_text(&target.node).await
+        && value.to_ascii_lowercase().contains(&option)
+    {
+        return true;
+    }
+
+    crate::inspect::descendant_option_selected(&target.node, &option).await
 }
 
 async fn set_toggle(

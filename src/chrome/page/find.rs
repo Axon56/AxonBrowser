@@ -21,8 +21,17 @@ pub async fn find_nth(
     raw_selectors: &[String],
     nth: Option<usize>,
 ) -> Result<LiveNode> {
-    let matches = find(scope, raw_selectors).await?;
-    select_nth(matches, nth, "page")
+    // The accessibility tree intermittently drops subtrees, so re-fetch with
+    // backoff instead of trusting a single read.
+    crate::chrome::retry::with_backoff(3, || {
+        let scope = scope.clone();
+        let selectors = raw_selectors.to_vec();
+        async move {
+            let matches = find(&scope, &selectors).await?;
+            select_nth(matches, nth, "page")
+        }
+    })
+    .await
 }
 
 pub async fn count(scope: &PageScope, raw_selectors: &[String]) -> Result<usize> {

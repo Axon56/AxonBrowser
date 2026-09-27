@@ -1,6 +1,6 @@
 use std::{future::Future, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::time::sleep;
 
 const DEFAULT_ATTEMPTS: usize = 6;
@@ -27,6 +27,34 @@ where
             }
         }
     }
+}
+
+/// Retry an operation with exponential backoff.
+///
+/// The accessibility tree intermittently returns errors or an incomplete
+/// subtree, so a single read is not trustworthy. Re-fetch with backoff instead
+/// of failing the step.
+pub async fn with_backoff<T, F, Fut>(attempts: usize, mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let attempts = attempts.max(1);
+    let mut delay = Duration::from_millis(100);
+    let mut last_error = None;
+
+    for attempt in 0..attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) => last_error = Some(err),
+        }
+        if attempt + 1 < attempts {
+            sleep(delay).await;
+            delay = delay.saturating_mul(2);
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("operation failed after {attempts} attempts")))
 }
 
 pub fn is_transient_accessibility_error(message: &str) -> bool {

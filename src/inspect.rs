@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use async_recursion::async_recursion;
@@ -17,6 +17,8 @@ use crate::{
     model::{LiveNode, UiNode, line_label},
     selector::Selector,
 };
+
+use tokio::time::sleep;
 
 pub async fn resolve(query: &str, selectors: &[Selector]) -> Result<Vec<LiveNode>> {
     let root = resolve_root(query).await?;
@@ -400,6 +402,255 @@ fn normalize_query(query: &str) -> Result<String> {
         return Err(anyhow!("query must not be empty"));
     }
     Ok(needle)
+}
+
+/// Read component extents and wait until they stop moving.
+///
+/// Scrolling is asynchronous: `scroll_to` returns before the page has finished
+/// settling, so extents read immediately after a scroll can still describe the
+/// pre-scroll or mid-animation position. Poll until two consecutive reads agree
+/// so callers act on the position the element actually occupies now.
+pub async fn stable_extents(node: &LiveNode) -> Result<(i32, i32, i32, i32)> {
+    let mut previous: Option<(i32, i32, i32, i32)> = None;
+    let mut last: Option<(i32, i32, i32, i32)> = None;
+
+    for attempt in 0..6u64 {
+        let extents = component_extents(node).await?;
+        if previous == Some(extents) {
+            return Ok(extents);
+        }
+        previous = Some(extents);
+        last = Some(extents);
+        sleep(Duration::from_millis(50 + attempt * 40)).await;
+    }
+
+    last.ok_or_else(|| anyhow!("failed to read component extents"))
+}
+
+/// Center of the node from freshly settled extents, in screen coordinates.
+pub async fn clickable_point_stable(node: &LiveNode) -> Result<(i32, i32)> {
+    let (x, y, width, height) = stable_extents(node).await?;
+    if width <= 0 || height <= 0 {
+        return Err(anyhow!("matched node has non-visible extents"));
+    }
+    Ok((x + (width / 2), y + (height / 2)))
+}
+
+/// Ask the accessibility tree which element actually occupies a screen point.
+///
+/// Called on a high-level node (the page root or window) so the answer is the
+/// topmost element at that point, which is how an overlay is detected.
+pub async fn accessible_at_point(
+    node: &LiveNode,
+    x: i32,
+    y: i32,
+) -> Result<Option<ObjectRefOwned>> {
+    let component = match bind_component(node).await {
+        Ok(component) => component,
+        Err(_) => return Ok(None),
+    };
+
+    match component
+        .get_accessible_at_point(x, y, CoordType::Screen)
+        .await
+    {
+        Ok(reference) if !reference.is_null() => Ok(Some(reference)),
+        _ => Ok(None),
+    }
+}
+
+/// Stable identity for an accessibility object reference.
+pub fn ref_key(reference: &ObjectRefOwned) -> String {
+    format!(
+        "{}|{}",
+        reference.name_as_str().unwrap_or_default(),
+        reference.path_as_str()
+    )
+}
+
+/// Accessible name of an object reference, if it has one.
+pub fn ref_name(reference: &ObjectRefOwned) -> &str {
+    reference.name_as_str().unwrap_or_default()
+}
+
+/// Best-effort visible text for a node: its own name plus its descendants'.
+///
+/// Custom widgets often expose their value as a child `Static` node rather than
+/// through the AT-SPI text interface, so verification cannot rely on
+/// `read_text` alone.
+pub async fn node_text(node: &LiveNode) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(name) = node.name.as_deref() {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+
+    for descendant in descendant_refs(node, 3).await.unwrap_or_default() {
+        if let Some(name) = descendant.name_as_str() {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// Whether a descendant whose name matches `option` reports itself as selected.
+///
+/// Native selects report their value as an unhelpful placeholder, so selection
+/// is verified from the state of the matching option node instead of from text.
+pub async fn descendant_option_selected(node: &LiveNode, option: &str) -> bool {
+    let option = option.trim().to_ascii_lowercase();
+    if option.is_empty() {
+        return true;
+    }
+
+    for descendant in descendant_refs(node, 3).await.unwrap_or_default() {
+        let Some(name) = descendant.name_as_str() else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().contains(&option) {
+            continue;
+        }
+
+        let live = LiveNode {
+            object_ref: descendant,
+            role: String::new(),
+            name: None,
+            path: Vec::new(),
+        };
+        if let Ok(states) = read_state_set(&live).await
+            && (states.contains(atspi::State::Selected)
+                || states.contains(atspi::State::Checked)
+                || states.contains(atspi::State::Focused)
+                || states.contains(atspi::State::Pressed))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Role and name of an object reference, for describing what blocked a click.
+pub async fn describe_ref(reference: &ObjectRefOwned) -> String {
+    let Ok(connection) = connect_accessibility().await else {
+        return "<unavailable>".to_string();
+    };
+    let Ok(accessible) = reference.as_accessible_proxy(connection.connection()).await else {
+        return "<unavailable>".to_string();
+    };
+
+    let role = read_role(&accessible).await;
+    let name = read_name(&accessible).await;
+    line_label(&role, name.as_deref())
+}
+
+/// Collect the references of every descendant, bounded by depth.
+pub async fn descendant_refs(node: &LiveNode, max_depth: usize) -> Result<Vec<ObjectRefOwned>> {
+    let connection = connect_accessibility().await?;
+    let mut refs = Vec::new();
+    collect_descendant_refs(node, connection.connection(), max_depth, &mut refs).await?;
+    Ok(refs)
+}
+
+#[async_recursion]
+async fn collect_descendant_refs(
+    node: &LiveNode,
+    conn: &atspi::zbus::Connection,
+    max_depth: usize,
+    refs: &mut Vec<ObjectRefOwned>,
+) -> Result<()> {
+    if max_depth == 0 {
+        return Ok(());
+    }
+
+    let Ok(accessible) = node.object_ref.as_accessible_proxy(conn).await else {
+        return Ok(());
+    };
+    let Ok(children) = accessible.get_children().await else {
+        return Ok(());
+    };
+
+    for child_ref in children {
+        if child_ref.is_null() {
+            continue;
+        }
+        refs.push(child_ref.clone());
+        let child = LiveNode {
+            object_ref: child_ref,
+            role: String::new(),
+            name: None,
+            path: node.path.clone(),
+        };
+        collect_descendant_refs(&child, conn, max_depth - 1, refs).await?;
+    }
+
+    Ok(())
+}
+
+/// Walk down from `root` and return the chain of references leading to
+/// `target`, including the target itself. Empty when the target is not found.
+pub async fn ancestor_chain(
+    root: &LiveNode,
+    target: &ObjectRefOwned,
+) -> Result<Vec<ObjectRefOwned>> {
+    let connection = connect_accessibility().await?;
+    let wanted = ref_key(target);
+    let mut chain = Vec::new();
+    if find_ref_chain(root, connection.connection(), &wanted, &mut chain).await? {
+        Ok(chain)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+#[async_recursion]
+async fn find_ref_chain(
+    node: &LiveNode,
+    conn: &atspi::zbus::Connection,
+    wanted: &str,
+    chain: &mut Vec<ObjectRefOwned>,
+) -> Result<bool> {
+    chain.push(node.object_ref.clone());
+    if ref_key(&node.object_ref) == wanted {
+        return Ok(true);
+    }
+
+    let Ok(accessible) = node.object_ref.as_accessible_proxy(conn).await else {
+        chain.pop();
+        return Ok(false);
+    };
+    let Ok(children) = accessible.get_children().await else {
+        chain.pop();
+        return Ok(false);
+    };
+
+    for child_ref in children {
+        if child_ref.is_null() {
+            continue;
+        }
+        let child = LiveNode {
+            object_ref: child_ref,
+            role: String::new(),
+            name: None,
+            path: node.path.clone(),
+        };
+        if find_ref_chain(&child, conn, wanted, chain).await? {
+            return Ok(true);
+        }
+    }
+
+    chain.pop();
+    Ok(false)
 }
 
 async fn bind_component(node: &LiveNode) -> Result<ComponentProxy<'_>> {

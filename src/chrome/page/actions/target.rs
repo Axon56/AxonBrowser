@@ -9,6 +9,8 @@ pub struct PageActionTarget {
     pub node: LiveNode,
     pub label: String,
     pub path: String,
+    /// Page root the target was resolved under, used for overlay hit-testing.
+    pub root: LiveNode,
 }
 
 impl PageActionTarget {
@@ -24,7 +26,13 @@ impl PageActionTarget {
         let node = find::find_nth(scope, raw_selectors, nth).await?;
         let label = node.line_label();
         let path = node.path.join(" > ");
-        Ok(Self { node, label, path })
+        let root = crate::chrome::page::root::resolve_page_scope(scope).await?;
+        Ok(Self {
+            node,
+            label,
+            path,
+            root,
+        })
     }
 
     pub async fn browser_window(&self) -> Result<window::WindowMatch> {
@@ -45,5 +53,19 @@ impl PageActionTarget {
 
     pub async fn state_set(&self) -> Result<atspi::StateSet> {
         crate::inspect::read_state_set(&self.node).await
+    }
+}
+
+impl crate::overlay::ClickTarget for PageActionTarget {
+    fn node(&self) -> &LiveNode {
+        &self.node
+    }
+
+    fn root(&self) -> &LiveNode {
+        &self.root
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }

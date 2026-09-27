@@ -13,8 +13,11 @@ pub async fn mouse_click_target_button(
     button: u8,
     repeat: u8,
 ) -> Result<String> {
-    let (browser_window, relative_x, relative_y) = window_relative_point(target).await?;
-    let (screen_x, screen_y) = inspect::clickable_point(&target.node).await?;
+    let browser_window = target.browser_window().await?;
+    let (relative_x, relative_y, dismissed) =
+        crate::overlay::guarded_click_point(target, &browser_window).await?;
+    let screen_x = browser_window.x + relative_x;
+    let screen_y = browser_window.y + relative_y;
     let activation_note = context::activate_window_note(&browser_window.id);
     window::mousemove_click_absolute_button(screen_x, screen_y, button, repeat)?;
 
@@ -24,7 +27,7 @@ pub async fn mouse_click_target_button(
         _ => "clicked".to_string(),
     };
 
-    Ok(format!(
+    let mut summary = format!(
         "{} {} via X11 at {},{} in window {} ({}, {})",
         click_kind,
         target.label,
@@ -33,13 +36,21 @@ pub async fn mouse_click_target_button(
         browser_window.id,
         target.path,
         activation_note
-    ))
+    );
+    if let Some(overlay) = dismissed {
+        summary = format!(
+            "{} | dismissed overlay {} before clicking",
+            summary, overlay
+        );
+    }
+
+    Ok(summary)
 }
 
 pub async fn window_relative_point(
     target: &PageActionTarget,
 ) -> Result<(window::WindowMatch, i32, i32)> {
-    let (screen_x, screen_y) = inspect::clickable_point(&target.node).await?;
+    let (screen_x, screen_y) = inspect::clickable_point_stable(&target.node).await?;
     let browser_window = window::find_window_at_point(screen_x, screen_y)?;
     let relative_x = screen_x - browser_window.x;
     let relative_y = screen_y - browser_window.y;
