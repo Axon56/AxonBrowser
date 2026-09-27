@@ -10,6 +10,7 @@ pub async fn press_key(locator_raw: &str, key: &str) -> Result<String> {
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     window::send_key(&browser_window.id, key)?;
+    window::settle_after_input().await;
 
     Ok(format!(
         "pressed {} on {} in window {} ({}, {}, focus: {})",

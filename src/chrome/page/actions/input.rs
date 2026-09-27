@@ -52,6 +52,7 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
         window::send_key(&browser_window.id, "ctrl+v")?;
         "window-targeted clipboard paste"
     };
+    window::settle_after_input().await;
 
     Ok(attach_notes(
         format!(

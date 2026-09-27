@@ -4,6 +4,10 @@ use anyhow::{Context, Result, anyhow, bail};
 
 const DEFAULT_TYPE_DELAY_MS: &str = "120";
 
+/// Grace period applied after delivering synthetic input, before the process is
+/// allowed to exit and tear down its accessibility connection.
+const SETTLE_AFTER_INPUT_MS: u64 = 500;
+
 #[derive(Debug, Clone)]
 pub struct WindowMatch {
     pub id: String,
@@ -249,6 +253,18 @@ pub fn send_key_active(key: &str) -> Result<()> {
         format!("failed to send key {key:?} to the active X11 window"),
         format!("xdotool key failed for active window using {key:?}"),
     )
+}
+
+/// Wait briefly after sending synthetic input so the browser can finish applying
+/// the events before this process exits.
+///
+/// The accessibility connection this process holds is closed when the process
+/// exits. Closing it while the browser is still handling a key we just sent
+/// races with the browser's event processing and has been observed to segfault
+/// Chrome (SIGSEGV, exit 139) when `--force-renderer-accessibility` is enabled.
+/// Settling first lets the browser finish, which removes the race.
+pub async fn settle_after_input() {
+    tokio::time::sleep(std::time::Duration::from_millis(SETTLE_AFTER_INPUT_MS)).await;
 }
 
 pub fn key_down(window_id: &str, key: &str) -> Result<()> {

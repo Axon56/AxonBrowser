@@ -31,6 +31,7 @@ pub async fn type_text(locator_raw: &str, text: &str) -> Result<String> {
         window::type_text(&browser_window.id, text)?;
         "X11 key injection"
     };
+    window::settle_after_input().await;
 
     Ok(format!(
         "typed into {} via {} in window {} ({}, {}, focus: {})",

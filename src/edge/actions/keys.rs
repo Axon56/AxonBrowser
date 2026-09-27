@@ -11,6 +11,7 @@ pub async fn press_key(locator_raw: &str, key: &str) -> Result<String> {
         let browser_window = crate::edge::window::find_edge_window(None)?;
         let activation_note = context::activate_window_note(&browser_window.id);
         window::send_key(&browser_window.id, key)?;
+        window::settle_after_input().await;
         return Ok(format!(
             "pressed {} in edge address bar window {} ({}, {})",
             key, browser_window.id, browser_window.name, activation_note
@@ -22,6 +23,7 @@ pub async fn press_key(locator_raw: &str, key: &str) -> Result<String> {
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     window::send_key(&browser_window.id, key)?;
+    window::settle_after_input().await;
 
     Ok(format!(
         "pressed {} on {} in window {} ({}, {}, focus: {})",
@@ -43,6 +45,7 @@ pub async fn press_enter(locator_raw: Option<&str>) -> Result<String> {
                 })?;
             let activation_note = context::activate_window_note(&browser_window.id);
             window::send_key(&browser_window.id, "Return")?;
+            window::settle_after_input().await;
             Ok(format!(
                 "pressed Return via browser-window fallback {} ({}, original locator path failed: {})",
                 browser_window.id, activation_note, primary_err

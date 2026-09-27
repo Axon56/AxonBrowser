@@ -1,5 +1,7 @@
 use anyhow::{Result, bail};
 
+use crate::window;
+
 use super::{context, focus};
 
 pub async fn type_text(locator_raw: &str, text: &str) -> Result<String> {
@@ -15,6 +17,7 @@ pub async fn type_text(locator_raw: &str, text: &str) -> Result<String> {
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     context::type_via_clipboard(&browser_window.id, text)?;
+    window::settle_after_input().await;
     if target.is_address_bar() {
         let observed = context::read_address_bar_via_clipboard(&browser_window.id)?;
         if observed.trim() != text.trim() {

@@ -26,6 +26,7 @@ pub async fn press_key(scope: &PageScope, raw_selectors: &[String], key: &str) -
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     window::send_key(&browser_window.id, key)?;
+    window::settle_after_input().await;
 
     Ok(attach_notes(
         format!(
@@ -38,7 +39,7 @@ pub async fn press_key(scope: &PageScope, raw_selectors: &[String], key: &str) -
 
 pub async fn press_enter(scope: &PageScope, raw_selectors: &[String]) -> Result<String> {
     if raw_selectors.is_empty() {
-        return press_enter_active_window("page press-enter with no selectors");
+        return press_enter_active_window("page press-enter with no selectors").await;
     }
 
     let target = PageActionTarget::resolve(scope, raw_selectors).await?;
@@ -51,11 +52,12 @@ pub async fn press_enter(scope: &PageScope, raw_selectors: &[String]) -> Result<
     }
 
     let focus_summary = focus::focus(scope, raw_selectors, None).await?;
-    let enter_summary = press_enter_active_window("page press-enter after focusing selector")?;
+    let enter_summary =
+        press_enter_active_window("page press-enter after focusing selector").await?;
     Ok(format!("{} | {}", focus_summary, enter_summary))
 }
 
-fn press_enter_active_window(context_label: &str) -> Result<String> {
+async fn press_enter_active_window(context_label: &str) -> Result<String> {
     if let Ok(window_match) = chrome_window::find_browser_window(None) {
         let activation_note = context::activate_window_note(&window_match.id);
         window::send_key(&window_match.id, "Return").with_context(|| {
@@ -64,6 +66,7 @@ fn press_enter_active_window(context_label: &str) -> Result<String> {
                 context_label, window_match.id
             )
         })?;
+        window::settle_after_input().await;
         return Ok(format!(
             "pressed Return via browser-window fallback {} ({})",
             window_match.id, activation_note
@@ -77,6 +80,7 @@ fn press_enter_active_window(context_label: &str) -> Result<String> {
             context_label
         )
     })?;
+    window::settle_after_input().await;
 
     Ok(match active_id {
         Some(id) => format!("pressed Return via active-window hard fallback ({})", id),
