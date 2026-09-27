@@ -110,7 +110,7 @@ async fn resolve_page_root_once() -> Result<LiveNode> {
     for chain in PAGE_ROOT_CHAINS {
         match resolve_chain(chain).await {
             Ok(nodes) if !nodes.is_empty() => {
-                return Ok(nodes.into_iter().next().expect("non-empty result"));
+                return Ok(outermost_document(nodes));
             }
             Ok(_) => failures.push(format!("{} => no matches", format_chain(chain))),
             Err(err) => failures.push(format!("{} => {}", format_chain(chain), err)),
@@ -121,6 +121,17 @@ async fn resolve_page_root_once() -> Result<LiveNode> {
         "failed to resolve firefox page root; tried {}",
         failures.join("; ")
     ))
+}
+
+/// Pick the outermost matching document as the page root.
+///
+/// A page that embeds an iframe exposes both the top-level document and the
+/// frame's document as `Document Web` nodes. Taking the first match can select
+/// the nested document, which makes every page command silently target the
+/// iframe instead of the page, so prefer the shallowest candidate.
+fn outermost_document(mut nodes: Vec<LiveNode>) -> LiveNode {
+    nodes.sort_by_key(|node| node.path.len());
+    nodes.into_iter().next().expect("non-empty result")
 }
 
 async fn resolve_chain(chain: &[&str]) -> Result<Vec<LiveNode>> {
