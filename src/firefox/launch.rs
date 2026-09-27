@@ -124,9 +124,12 @@ pub async fn launch_and_wait_with_flavor(
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.max(15_000));
     let interval = Duration::from_millis(poll_ms.max(1));
+    // Keep the most recent BiDi failure so a launch timeout explains itself
+    // instead of only reporting that no window appeared.
+    let mut last_bidi_error: Option<String> = None;
 
     loop {
-        if let Some(current) = bidi_ready_on_port(bidi_port, &url).await? {
+        if let Some(current) = bidi_ready_on_port(bidi_port, &url, &mut last_bidi_error).await? {
             let preferred = choose_window_for_context(pid, &baseline, current.title.as_str())?;
             if let Some(window_match) =
                 preferred.or_else(|| find_window_for_pid(pid).ok().flatten())
@@ -150,7 +153,9 @@ pub async fn launch_and_wait_with_flavor(
         }
 
         if let Some(window_match) = find_window_for_pid(pid)?
-            && bidi_ready_on_port(bidi_port, &url).await?.is_some()
+            && bidi_ready_on_port(bidi_port, &url, &mut last_bidi_error)
+                .await?
+                .is_some()
         {
             let _ = crate::window::activate_window(&window_match.id);
             let _ = session::remember_browser_window_target(&window_match.id);
@@ -170,7 +175,9 @@ pub async fn launch_and_wait_with_flavor(
         }
 
         if let Some(window_match) = detect_new_window(&baseline)?
-            && bidi_ready_on_port(bidi_port, &url).await?.is_some()
+            && bidi_ready_on_port(bidi_port, &url, &mut last_bidi_error)
+                .await?
+                .is_some()
         {
             let _ = crate::window::activate_window(&window_match.id);
             let _ = session::remember_browser_window_target(&window_match.id);
@@ -192,10 +199,14 @@ pub async fn launch_and_wait_with_flavor(
         if start.elapsed() >= timeout {
             session::clear_browser_session_state();
             bail!(
-                "timed out after {}ms waiting for a new {} window; log: {}",
+                "timed out after {}ms waiting for a new {} window; log: {}{}",
                 timeout_ms,
                 flavor.label(),
-                log_path.display()
+                log_path.display(),
+                last_bidi_error
+                    .as_deref()
+                    .map(|err| format!("; last BiDi error: {err}"))
+                    .unwrap_or_default(),
             );
         }
 
@@ -475,8 +486,11 @@ fn normalize_launch_url(raw: &str) -> Result<String> {
 
 fn extra_browser_args(flavor: BrowserFlavor) -> Vec<&'static str> {
     match flavor {
-        BrowserFlavor::Firefox => vec!["--browser"],
-        BrowserFlavor::Camoufox => vec!["--browser"],
+        // `--remote-allow-system-access` lets WebDriver BiDi evaluate script in
+        // privileged contexts such as `about:home`, which a fresh profile opens
+        // by default. Without it those contexts reject `document.title`.
+        BrowserFlavor::Firefox => vec!["--browser", "--remote-allow-system-access"],
+        BrowserFlavor::Camoufox => vec!["--browser", "--remote-allow-system-access"],
     }
 }
 
@@ -491,12 +505,20 @@ fn allocate_bidi_port() -> Result<u16> {
     Ok(port)
 }
 
-async fn bidi_ready_on_port(bidi_port: u16, url: &str) -> Result<Option<bidi::ContextInfo>> {
-    if let Ok(Some(current)) = bidi::current_context_on_port(bidi_port, Some(url)).await
-        && !current.url.trim().is_empty()
-    {
-        let _ = session::remember_browser_url(&current.url);
-        return Ok(Some(current));
+async fn bidi_ready_on_port(
+    bidi_port: u16,
+    url: &str,
+    last_error: &mut Option<String>,
+) -> Result<Option<bidi::ContextInfo>> {
+    match bidi::current_context_on_port(bidi_port, Some(url)).await {
+        Ok(Some(current)) if !current.url.trim().is_empty() => {
+            let _ = session::remember_browser_url(&current.url);
+            Ok(Some(current))
+        }
+        Ok(_) => Ok(None),
+        Err(err) => {
+            *last_error = Some(err.to_string());
+            Ok(None)
+        }
     }
-    Ok(None)
 }

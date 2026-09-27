@@ -485,7 +485,14 @@ impl BidiSession {
                 .and_then(Value::as_str)
                 .unwrap_or("about:blank")
                 .to_string();
-            let title = self.evaluate_string(context_id, "document.title").await?;
+            // Privileged contexts (for example `about:home` on a fresh profile)
+            // reject script evaluation unless Firefox was started with
+            // `--remote-allow-system-access`. A single unreadable context must not
+            // abort enumeration, otherwise launch detection never becomes ready.
+            let title = self
+                .evaluate_string(context_id, "document.title")
+                .await
+                .unwrap_or_default();
             let visibility = self
                 .evaluate_string(context_id, "document.visibilityState")
                 .await
