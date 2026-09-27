@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Guibot Page Demo</title></head>
+<body>
+<h1>Guibot Page Demo</h1>
+
+<h2>Name form</h2>
+<form id="name-form">
+  <label for="name">Name</label>
+  <input id="name" type="text">
+  <button type="submit" id="submit">Submit</button>
+</form>
+<p id="name-result"></p>
+
+<h2>Navigation</h2>
+<a href="linked.html">Open linked page</a>
+
+<h2>Query</h2>
+<form action="submitted.html" method="get">
+  <label for="query">Query</label>
+  <input id="query" type="text" name="q">
+</form>
+
+<h2>Toggles</h2>
+<label><input type="checkbox" id="terms"> Accept Terms</label>
+<label><input type="radio" name="plan" id="pro"> Pro Plan</label>
+<label for="pet">Pet</label>
+<select id="pet">
+  <option>Cat</option>
+  <option>Otter</option>
+</select>
+<p id="toggle-status">Toggle status: terms:off, plan:none, pet:Cat</p>
+
+<h2>Upload</h2>
+<label for="file">Upload File</label>
+<input id="file" type="file">
+<p id="upload-status"></p>
+
+<h2>Frame</h2>
+<iframe src="frame.html" title="Demo Frame" width="420" height="160"></iframe>
+
+<h2>Dismiss</h2>
+<button id="dismiss">Dismiss Notice</button>
+<p id="notice">Press dismiss to hide me.</p>
+
+<script>
+function updateToggle() {
+  var t = document.getElementById('terms').checked ? 'on' : 'off';
+  var p = document.getElementById('pro').checked ? 'pro' : 'none';
+  var pet = document.getElementById('pet').value;
+  document.getElementById('toggle-status').textContent =
+    'Toggle status: terms:' + t + ', plan:' + p + ', pet:' + pet;
+}
+['terms', 'pro', 'pet'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', updateToggle);
+});
+
+document.getElementById('name-form').addEventListener('submit', function (event) {
+  event.preventDefault();
+  document.getElementById('name-result').textContent =
+    'Submitted: ' + document.getElementById('name').value;
+});
+
+document.getElementById('file').addEventListener('change', function () {
+  var name = this.files && this.files[0] ? this.files[0].name : '';
+  document.getElementById('upload-status').textContent = 'Selected file: ' + name;
+});
+
+document.getElementById('dismiss').addEventListener('click', function () {
+  document.getElementById('notice').style.display = 'none';
+});
+</script>
+</body>
+</html>

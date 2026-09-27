@@ -1,5 +1,9 @@
 /target
 
-/artifacts/
+# Screenshots and sweep output are generated, but the demo site the sweep
+# scripts drive is a fixture and must be tracked, or those scripts cannot run
+# on a fresh clone.
+/artifacts/*
+!/artifacts/page-test-site/
 
 /dist/

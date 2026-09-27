@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Elementor Style Modal Demo</title>
+<style>
+  /* Mirrors how Elementor popups behave: the page content is marked
+     aria-hidden and made inert while a full-screen dialog is open. */
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999;
+           display: flex; align-items: center; justify-content: center; }
+  #modal[hidden] { display: none; }
+  #modal .card { background: #fff; padding: 24px; width: 320px; }
+  .page { padding: 20px; }
+</style>
+</head>
+<body>
+<div id="modal" role="dialog" aria-modal="true" aria-label="Special offer">
+  <div class="card">
+    <h2>Special offer</h2>
+    <button id="close">Close</button>
+  </div>
+</div>
+
+<div class="page" id="page">
+  <h1>Elementor Style Modal Demo</h1>
+  <label for="origin">Origin</label>
+  <input id="origin" type="text">
+  <label for="destination">Destination</label>
+  <input id="destination" type="text">
+  <p id="status">Nothing clicked yet.</p>
+  <button id="confirm">Confirm Booking</button>
+</div>
+
+<script>
+  // Elementor marks the rest of the page inert while its popup is open.
+  var page = document.getElementById('page');
+  var modal = document.getElementById('modal');
+  function setInert(on) {
+    page.setAttribute('aria-hidden', on ? 'true' : 'false');
+    if (on) { page.setAttribute('inert', ''); } else { page.removeAttribute('inert'); }
+  }
+  setInert(true);
+  document.getElementById('close').addEventListener('click', function () {
+    modal.hidden = true;
+    setInert(false);
+  });
+  document.getElementById('confirm').addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Booking confirmed.';
+  });
+</script>
+</body>
+</html>

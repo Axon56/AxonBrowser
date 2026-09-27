@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Demo Frame</title></head>
+<body>
+<label for="frame-name">Frame Name</label>
+<input id="frame-name" type="text">
+<button id="save-frame">Save Frame</button>
+<p id="frame-result"></p>
+<script>
+document.getElementById('save-frame').addEventListener('click', function () {
+  document.getElementById('frame-result').textContent =
+    'Frame saved: ' + document.getElementById('frame-name').value;
+});
+</script>
+</body>
+</html>

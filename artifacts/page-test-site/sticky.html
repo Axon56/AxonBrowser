@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sticky Header Demo</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  /* 70px sticky header holding a navigation link, like a real booking site. */
+  #nav { position: sticky; top: 0; height: 70px; background: #123; z-index: 100; }
+  #nav a { display: inline-block; height: 70px; line-height: 70px; padding: 0 20px;
+           color: #fff; text-decoration: none; }
+  #spacer { height: 1200px; background: #eee; }
+  #form { padding: 20px; }
+  label { display: block; margin-top: 12px; }
+</style>
+</head>
+<body>
+<nav id="nav">
+  <a id="travel" href="prohibited.html">TRAVEL</a>
+  <a id="routes" href="prohibited.html">ROUTES</a>
+</nav>
+<div id="spacer">scroll filler</div>
+<div id="form">
+  <h1>Sticky Header Demo</h1>
+  <label for="departure-date">Departure date</label>
+  <input id="departure-date" type="text" placeholder="DD MMM YYYY">
+  <label for="origin">Origin</label>
+  <input id="origin" type="text">
+  <label><input type="checkbox" id="terms"> Accept Terms</label>
+  <p id="status">Nothing clicked yet.</p>
+  <button id="confirm">Confirm Booking</button>
+</div>
+<script>
+  // The header links navigate; the form controls must not.
+  document.getElementById('departure-date').addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Departure date clicked.';
+  });
+</script>
+</body>
+</html>

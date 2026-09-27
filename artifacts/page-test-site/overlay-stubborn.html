@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Stubborn Overlay Demo</title>
+<style>
+  #confirm { position: absolute; top: 320px; left: 420px; }
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999;
+           display: flex; align-items: center; justify-content: center; }
+  #modal[hidden] { display: none; }
+  #modal .card { background: #fff; padding: 24px; width: 320px; }
+</style>
+</head>
+<body>
+<h1>Stubborn Overlay Demo</h1>
+<button id="confirm">Confirm Booking</button>
+<p id="status">No booking confirmed.</p>
+
+<div id="modal" role="dialog" aria-modal="true" aria-label="Special offer">
+  <div class="card">
+    <h2>Special offer</h2>
+    <p>This popup ignores Escape and stays put.</p>
+    <button id="close">Close</button>
+  </div>
+</div>
+
+<script>
+  // Deliberately no Escape handler: this overlay cannot be dismissed with the
+  // keyboard, so a coordinate click on the covered button must be refused.
+  document.getElementById('close').addEventListener('click', function () {
+    document.getElementById('modal').hidden = true;
+  });
+  document.getElementById('confirm').addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Booking confirmed.';
+  });
+</script>
+</body>
+</html>
