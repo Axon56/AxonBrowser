@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${AXONBROWSER_REPO:-ayomidelog/AxonBrowser}"
+REPO="${AXONBROWSER_REPO:-Axon56/AxonBrowser}"
 VERSION="${AXONBROWSER_VERSION:-${VERSION:-latest}}"
 INSTALL_DIR="${AXONBROWSER_INSTALL_DIR:-/usr/local/bin}"
 BASE_URL="${AXONBROWSER_BASE_URL:-}"

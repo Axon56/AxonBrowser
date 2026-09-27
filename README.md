@@ -11,7 +11,7 @@
 Download a prebuilt binary — no Rust toolchain required:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ayomidelog/AxonBrowser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Axon56/AxonBrowser/main/install.sh | bash
 ```
 
 Then install the runtime packages it needs:
@@ -20,7 +20,7 @@ Then install the runtime packages it needs:
 axonbrowser install-deps
 ```
 
-Prebuilt bundles for Linux x86_64 and arm64 are published on the [latest release](https://github.com/ayomidelog/AxonBrowser/releases/latest). Each bundle contains the `axonbrowser` binary plus the install and runtime dependency scripts, so you can also unpack it directly:
+Prebuilt bundles for Linux x86_64 and arm64 are published on the [latest release](https://github.com/Axon56/AxonBrowser/releases/latest). Each bundle contains the `axonbrowser` binary plus the install and runtime dependency scripts, so you can also unpack it directly:
 
 ```bash
 tar -xzf axonbrowser-linux-x86_64.tar.gz

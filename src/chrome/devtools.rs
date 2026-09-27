@@ -166,6 +166,30 @@ pub async fn capture_screenshot() -> Result<Vec<u8>> {
         .context("failed to decode Chrome DevTools screenshot payload")
 }
 
+/// Evaluate JavaScript in the current page and return its value.
+///
+/// Used to check facts the accessibility tree cannot express, such as whether
+/// the element under a point is disabled.
+pub async fn evaluate(expression: &str) -> Result<Value> {
+    let page =
+        current_page()?.ok_or_else(|| anyhow!("no Chrome page target exposed by DevTools"))?;
+    let response = send_page_command(
+        &page.web_socket_debugger_url,
+        "Runtime.evaluate",
+        json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
+    )
+    .await?;
+
+    // `send_page_command` returns the command result, and Runtime.evaluate
+    // nests the value one level deeper, so unwrap it here rather than making
+    // every caller know the shape.
+    Ok(response
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
 fn devtools_port() -> Result<Option<u16>> {
     let profile = match session::read_browser_profile() {
         Some(value) => PathBuf::from(value),

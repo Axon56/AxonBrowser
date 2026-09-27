@@ -85,6 +85,16 @@ pub async fn guarded_or_direct_click(
             Ok((browser_window, relative_x, relative_y, dismissed))
         }
         None => {
+            if let Some(state) =
+                crate::dom::element_at_point(crate::dom::current_flavor(), screen_x, screen_y).await
+                && state != "enabled"
+            {
+                bail!(
+                    "{} at this point is {state}, so clicking it would have no effect",
+                    label
+                );
+            }
+
             let relative_x = screen_x - browser_window.x;
             let relative_y = screen_y - browser_window.y;
             Ok((browser_window, relative_x, relative_y, None))
@@ -197,6 +207,20 @@ pub async fn guarded_click_point<T: ClickTarget>(
         let (screen_x, screen_y) = inspect::clickable_point_stable(target.node()).await?;
         match classify_point(target.root(), target.node(), screen_x, screen_y).await? {
             PointOwner::Target | PointOwner::Related => {
+                // The accessibility tree cannot always tell a disabled control
+                // from an enabled one, so confirm against the page itself
+                // before reporting a click that would change nothing.
+                if let Some(state) =
+                    crate::dom::element_at_point(crate::dom::current_flavor(), screen_x, screen_y)
+                        .await
+                    && state != "enabled"
+                {
+                    bail!(
+                        "{} at this point is {state}, so clicking it would have no effect",
+                        target.label()
+                    );
+                }
+
                 let relative_x = screen_x - browser_window.x;
                 let relative_y = screen_y - browser_window.y;
                 if relative_x < 0 || relative_y < 0 {

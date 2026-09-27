@@ -48,6 +48,11 @@ async fn click_target_node_guarded(
     path: &str,
     root: Option<&LiveNode>,
 ) -> Result<String> {
+    // Check the page itself before either click path runs. The accessibility
+    // action interface happily "activates" a disabled control and reports
+    // success while nothing changes, so this cannot be left to the tree.
+    crate::dom::refuse_if_disabled(node, label).await?;
+
     if invoke_default_action(node).await? {
         return Ok(format!("clicked {} via AT-SPI action ({})", label, path));
     }

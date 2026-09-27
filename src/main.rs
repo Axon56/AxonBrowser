@@ -1,7 +1,9 @@
 mod app;
+mod browser_flavor;
 mod browser_options;
 mod chrome;
 mod cli;
+mod dom;
 mod edge;
 mod firefox;
 mod inspect;

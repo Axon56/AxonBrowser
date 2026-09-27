@@ -26,7 +26,7 @@ command -v axonbrowser && axonbrowser --help
 If it is missing and the user wants setup, install with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ayomidelog/AxonBrowser/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Axon56/AxonBrowser/main/install.sh | bash
 ```
 
 If working from a local repository checkout, prefer:

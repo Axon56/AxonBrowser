@@ -709,6 +709,42 @@ fn remember_context(context: &ContextInfo) -> Result<()> {
     Ok(())
 }
 
+/// Evaluate JavaScript in the current page and return its value.
+///
+/// Used to check facts the accessibility tree cannot express, such as whether
+/// the element under a point is disabled.
+pub async fn evaluate(expression: &str) -> Result<Value> {
+    let mut client = BidiSession::connect().await?;
+    client.start().await?;
+    let result = async {
+        let context = client
+            .current_context_with_hint(None, None)
+            .await?
+            .ok_or_else(|| anyhow!("no Firefox browsing context available"))?;
+        client
+            .command(
+                "script.evaluate",
+                json!({
+                    "target": { "context": context.context },
+                    "expression": expression,
+                    "awaitPromise": true,
+                }),
+            )
+            .await
+            .map(|value| {
+                value
+                    .get("result")
+                    .and_then(|result| result.get("value"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            })
+    }
+    .await;
+    let end_result = client.end().await;
+    end_result?;
+    result
+}
+
 fn normalize_current_contexts(
     listed: &mut [ContextInfo],
     last_current_context: Option<&ContextInfo>,
