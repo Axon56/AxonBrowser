@@ -6,16 +6,26 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
-  linux-bundle:
-    runs-on: ubuntu-24.04
+  bundle:
+    name: Linux ${{ matrix.arch }} bundle
+    runs-on: ${{ matrix.runner }}
     container:
       image: debian:12
     defaults:
       run:
         shell: bash
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,44 +66,80 @@ jobs:
           . "$HOME/.cargo/env"
           cargo test
 
-      - name: Build release binaries
+      - name: Build release binary
         run: |
           set -euo pipefail
           . "$HOME/.cargo/env"
           cargo build --release --bins
 
-      - name: Assemble release assets
+      - name: Assemble release bundle
+        env:
+          BUNDLE_NAME: axonbrowser-linux-${{ matrix.arch }}
+          BUILD_BINARIES: "0"
         run: |
           set -euo pipefail
-          . "$HOME/.cargo/env"
           bash scripts/build-release-bundle.sh
 
-      - name: Upload bundle artifact
+      - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: axonbrowser-linux-x86_64
+          name: axonbrowser-linux-${{ matrix.arch }}
+          if-no-files-found: error
           path: |
-            dist/release/axonbrowser-linux-x86_64.tar.gz
-            dist/release/axonbrowser-linux-x86_64.tar.gz.sha256
-            dist/release/install.sh
+            dist/release/axonbrowser-linux-${{ matrix.arch }}.tar.gz
+            dist/release/axonbrowser-linux-${{ matrix.arch }}.tar.gz.sha256
 
-      - name: Publish first release assets
-        if: github.ref_type == 'tag' && github.ref_name == 'v1.0.0'
+  publish:
+    name: Publish release
+    needs: bundle
+    # Publish whatever bundles succeeded, so one failing architecture cannot
+    # withhold the others.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Collect bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+
+      - name: Add installer
+        run: |
+          set -euo pipefail
+          cp install.sh dist/release/install.sh
+          ls -l dist/release
+
+      - name: Select release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          body=".github/release-body-${GITHUB_REF_NAME}.md"
+          if [[ -f "$body" ]]; then
+            echo "body_path=$body" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish with curated notes
+        if: ${{ steps.notes.outputs.body_path != '' }}
         uses: softprops/action-gh-release@v2
         with:
-          name: AxonBrowser v1.0.0
-          body_path: .github/release-body-v1.0.0.md
+          name: AxonBrowser ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.body_path }}
           files: |
-            dist/release/axonbrowser-linux-x86_64.tar.gz
-            dist/release/axonbrowser-linux-x86_64.tar.gz.sha256
+            dist/release/*.tar.gz
+            dist/release/*.sha256
             dist/release/install.sh
 
-      - name: Publish GitHub release assets
-        if: github.ref_type == 'tag' && github.ref_name != 'v1.0.0'
+      - name: Publish with generated notes
+        if: ${{ steps.notes.outputs.body_path == '' }}
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/release/axonbrowser-linux-x86_64.tar.gz
-            dist/release/axonbrowser-linux-x86_64.tar.gz.sha256
+            dist/release/*.tar.gz
+            dist/release/*.sha256
             dist/release/install.sh
