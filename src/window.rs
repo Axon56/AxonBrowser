@@ -285,25 +285,26 @@ pub fn scroll(window_id: &str, direction: ScrollDirection, amount: u32) -> Resul
 }
 
 pub fn resize_window(window_id: &str, width: u32, height: u32) -> Result<()> {
-    let current = list_visible_windows()?
+    // Resize through xdotool so no window manager or wmctrl is required: the
+    // headless Xvfb session axonbrowser bootstraps has neither, and wmctrl
+    // cannot drive windows without an EWMH-compliant window manager.
+    if !list_visible_windows()?
         .into_iter()
-        .find(|candidate| candidate.id == window_id)
-        .ok_or_else(|| anyhow!("window {} is not visible for resize", window_id))?;
-    let geometry = format!("0,{},{},{},{}", current.x, current.y, width, height);
-    let output = Command::new("wmctrl")
-        .args(["-ir", window_id, "-e", &geometry])
-        .output()
-        .with_context(|| format!("failed to resize X11 window {window_id}"))?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "wmctrl resize failed for {}: {}",
-            window_id,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        .any(|candidate| candidate.id == window_id)
+    {
+        return Err(anyhow!("window {} is not visible for resize", window_id));
     }
 
-    Ok(())
+    run_xdotool_owned(
+        vec![
+            "windowsize".into(),
+            window_id.into(),
+            width.to_string(),
+            height.to_string(),
+        ],
+        format!("failed to resize X11 window {window_id}"),
+        format!("xdotool windowsize failed for {window_id}"),
+    )
 }
 
 pub fn list_visible_windows() -> Result<Vec<WindowMatch>> {
