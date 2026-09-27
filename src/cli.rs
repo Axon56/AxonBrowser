@@ -639,6 +639,10 @@ pub struct ChromePageSelectOptionArgs {
 
     /// Option label to select.
     pub option: String,
+
+    /// Zero-based match index when several options share the label.
+    #[arg(long)]
+    pub nth: Option<usize>,
 }
 
 #[derive(Debug, Args)]

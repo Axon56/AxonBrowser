@@ -6,6 +6,7 @@ use tokio::time::sleep;
 
 use crate::{
     chrome::{actions::click::click_target_node_with_root, page::root::PageScope},
+    model::LiveNode,
     selector, window,
 };
 
@@ -23,6 +24,7 @@ pub async fn select_option(
     scope: &PageScope,
     raw_selectors: &[String],
     option: &str,
+    nth: Option<usize>,
 ) -> Result<String> {
     let target = PageActionTarget::resolve(scope, raw_selectors).await?;
     let mut notes = Vec::new();
@@ -53,15 +55,33 @@ pub async fn select_option(
     }
 
     // Fall back to opening the control and clicking the option, then verify.
-    let open_summary =
+    let mut open_summary =
         click_target_node_with_root(&target.node, &target.label, &target.path, &target.root)
             .await?;
-    let option_selector = selector::Selector::parse(&format!("~{}", option))?;
-    let option_node = crate::chrome::page::root::resolve_in_page_scope(scope, &[option_selector])
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no page option matched {:?}", option))?;
+    // The keyboard attempt above can leave the list toggled shut, so if the
+    // options are not there, open the control again and look a second time
+    // before giving up.
+    let option_node = match resolve_option(scope, option, nth).await {
+        Ok(node) => node,
+        Err(first_err) => {
+            let reopened = click_target_node_with_root(
+                &target.node,
+                &target.label,
+                &target.path,
+                &target.root,
+            )
+            .await;
+            match reopened {
+                Ok(summary) => {
+                    open_summary = summary;
+                    resolve_option(scope, option, nth)
+                        .await
+                        .map_err(|_| first_err)?
+                }
+                Err(_) => return Err(first_err),
+            }
+        }
+    };
     let option_label = option_node.line_label();
     let option_path = option_node.path.join(" > ");
     let select_summary =
@@ -90,6 +110,50 @@ pub async fn select_option(
     };
 
     Ok(attach_notes(outcome, &notes))
+}
+
+/// Find the option to click.
+///
+/// Dropdowns render their choices with different accessibility roles: a native
+/// select exposes `Menu Item`, while a custom autocomplete usually exposes
+/// `List Item`. Matching only one role made `select-option` report "no page
+/// option matched" on dropdowns whose options were list items, so the roles are
+/// tried in turn and the first with a match wins.
+async fn resolve_option(scope: &PageScope, option: &str, nth: Option<usize>) -> Result<LiveNode> {
+    const OPTION_ROLES: &[&str] = &["List Item", "Menu Item", "Option", "Table Cell"];
+
+    let mut failures = Vec::new();
+    for role in OPTION_ROLES {
+        let raw = format!("{}~{}", role, option);
+        match crate::chrome::page::root::resolve_in_page_scope(
+            scope,
+            &[selector::Selector::parse(&raw)?],
+        )
+        .await
+        {
+            Ok(matches) if !matches.is_empty() => {
+                let index = nth.unwrap_or(0);
+                let total = matches.len();
+                return matches.into_iter().nth(index).ok_or_else(|| {
+                    anyhow!(
+                        "option {:?} matched {} {}(s) but index {} is out of range",
+                        option,
+                        total,
+                        role,
+                        index
+                    )
+                });
+            }
+            Ok(_) => failures.push(format!("{role} => no matches")),
+            Err(err) => failures.push(format!("{role} => {err}")),
+        }
+    }
+
+    Err(anyhow!(
+        "no page option matched {:?}; tried {}",
+        option,
+        failures.join("; ")
+    ))
 }
 
 /// Confirm the control now reports the option as its value.

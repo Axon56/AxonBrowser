@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_recursion::async_recursion;
@@ -35,8 +35,7 @@ pub async fn inspect_live(root: &LiveNode) -> Result<UiNode> {
         .await
         .context("failed to bind live node for tree inspection")?;
 
-    let mut visited = HashSet::new();
-    build_tree(&accessible, connection.connection(), &mut visited).await
+    build_tree(&accessible, connection.connection()).await
 }
 
 pub async fn resolve_within_scope(
@@ -325,20 +324,32 @@ async fn collect_descendants(
 }
 
 #[async_recursion]
-async fn build_tree(
+async fn build_tree(node: &AccessibleProxy<'_>, conn: &atspi::zbus::Connection) -> Result<UiNode> {
+    let mut budget = TreeBudget::new();
+    build_tree_inner(node, conn, &mut budget).await
+}
+
+#[async_recursion]
+async fn build_tree_inner(
     node: &AccessibleProxy<'_>,
     conn: &atspi::zbus::Connection,
-    visited: &mut HashSet<String>,
+    budget: &mut TreeBudget,
 ) -> Result<UiNode> {
-    let key = node_key(node);
-    if !visited.insert(key) {
-        let role = read_role(node).await;
-        let name = read_name(node).await;
-        return Ok(UiNode::new(role, name, Vec::new()));
-    }
-
     let role = read_role(node).await;
     let name = read_name(node).await;
+
+    // Cycle detection is scoped to the current path, not to the whole walk.
+    // A single visited set keyed by object reference silently dropped subtrees:
+    // Chrome recycles references for virtualized and re-rendered nodes, so the
+    // second appearance of a reference was emitted without its children. That
+    // is how a search input inside a dropdown went missing from the tree while
+    // Chrome's own tree still exposed it.
+    let key = node_key(node);
+    if budget.on_path.contains(&key) || !budget.charge() {
+        return Ok(UiNode::new(role, name, Vec::new()));
+    }
+    budget.on_path.push(key);
+
     let children_refs = node.get_children().await.with_context(|| {
         format!(
             "failed to read children for {}",
@@ -356,10 +367,39 @@ async fn build_tree(
             .as_accessible_proxy(conn)
             .await
             .with_context(|| format!("failed to bind child proxy for {}", debug_ref(&child_ref)))?;
-        children.push(build_tree(&child, conn, visited).await?);
+        children.push(build_tree_inner(&child, conn, budget).await?);
     }
 
+    budget.on_path.pop();
     Ok(UiNode::new(role, name, children))
+}
+
+/// Bounds a tree walk without dropping nodes.
+///
+/// `on_path` holds the references on the current branch, which detects a true
+/// cycle, and `remaining` caps total work so a pathological tree cannot run
+/// forever. Neither can silently truncate an unrelated subtree the way a global
+/// visited set did.
+struct TreeBudget {
+    on_path: Vec<String>,
+    remaining: usize,
+}
+
+impl TreeBudget {
+    fn new() -> Self {
+        Self {
+            on_path: Vec::new(),
+            remaining: 20_000,
+        }
+    }
+
+    fn charge(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
 }
 
 async fn read_clickable_point(component: &ComponentProxy<'_>) -> Result<(i32, i32)> {

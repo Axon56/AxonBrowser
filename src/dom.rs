@@ -89,7 +89,7 @@ pub async fn refuse_if_disabled(node: &crate::model::LiveNode, label: &str) -> a
         return Ok(());
     };
 
-    if state != "enabled" {
+    if state_blocks_click(&state) {
         anyhow::bail!(
             "{} is {state} in the page, so clicking it would have no effect",
             label
@@ -105,6 +105,15 @@ fn js_string(value: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// Whether a reported state should stop a click.
+///
+/// `readonly` is deliberately allowed: a readonly field is exactly what a date
+/// picker uses, and clicking it is how the picker opens. Only genuinely
+/// non-interactive states block.
+pub fn state_blocks_click(state: &str) -> bool {
+    !matches!(state, "enabled" | "readonly")
+}
+
 /// Reports whether the element under a point is disabled.
 ///
 /// Flatpickr and similar widgets disable an option with a CSS class rather than
@@ -113,14 +122,27 @@ fn js_string(value: &str) -> String {
 const ELEMENT_AT_POINT_JS: &str = r#"(function(){
   var el = document.elementFromPoint(__X__ - window.screenX, __Y__ - window.screenY);
   if (!el) return null;
-  var n = el;
-  for (var i = 0; i < 4 && n; i++) {
-    if (n.disabled === true) return 'disabled';
-    if (n.getAttribute && n.getAttribute('aria-disabled') === 'true') return 'aria-disabled';
-    var cls = (typeof n.className === 'string') ? n.className : '';
-    if (cls.indexOf('disabled') >= 0 || cls.indexOf('is-disabled') >= 0) return 'disabled';
-    n = n.parentElement;
+
+  // A readonly control is not a disabled one. Date pickers are readonly by
+  // design: the field cannot be typed into, but clicking it opens the picker,
+  // so readonly must stay clickable.
+  if (el.readOnly === true) return 'readonly';
+
+  // Only the control itself decides. Walking ancestors would let any wrapper
+  // that happens to carry a "disabled" class veto a click on a control inside
+  // it, which is how a readonly date field was refused.
+  if (el.disabled === true) return 'disabled';
+  if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return 'aria-disabled';
+
+  var cls = (typeof el.className === 'string') ? el.className : '';
+  var tokens = cls.split(/\s+/);
+  for (var i = 0; i < tokens.length; i++) {
+    var token = tokens[i].toLowerCase();
+    if (token === 'disabled' || token === 'is-disabled' || token === 'flatpickr-disabled') {
+      return 'disabled';
+    }
   }
+
   return 'enabled';
 })()"#;
 
@@ -145,10 +167,12 @@ const DISABLED_BY_NAME_JS: &str = r#"(function(){
     if (label !== want && text !== want) continue;
     matches++;
     var cls = (typeof el.className === 'string') ? el.className : '';
-    var isDisabled = el.disabled === true
+    // A readonly control is not a disabled one: date pickers are readonly by
+    // design and must stay clickable.
+    var isDisabled = el.readOnly !== true && (el.disabled === true
       || el.getAttribute('aria-disabled') === 'true'
       || cls.indexOf('disabled') >= 0
-      || cls.indexOf('is-disabled') >= 0;
+      || cls.indexOf('is-disabled') >= 0);
     if (isDisabled) disabled++;
   }
   if (matches === 0) return 'enabled';

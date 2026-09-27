@@ -87,7 +87,7 @@ pub async fn guarded_or_direct_click(
         None => {
             if let Some(state) =
                 crate::dom::element_at_point(crate::dom::current_flavor(), screen_x, screen_y).await
-                && state != "enabled"
+                && crate::dom::state_blocks_click(&state)
             {
                 bail!(
                     "{} at this point is {state}, so clicking it would have no effect",
@@ -213,7 +213,7 @@ pub async fn guarded_click_point<T: ClickTarget>(
                 if let Some(state) =
                     crate::dom::element_at_point(crate::dom::current_flavor(), screen_x, screen_y)
                         .await
-                    && state != "enabled"
+                    && crate::dom::state_blocks_click(&state)
                 {
                     bail!(
                         "{} at this point is {state}, so clicking it would have no effect",

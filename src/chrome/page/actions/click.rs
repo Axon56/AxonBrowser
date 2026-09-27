@@ -12,6 +12,18 @@ pub async fn click(
 ) -> Result<String> {
     let target = PageActionTarget::resolve_nth(scope, raw_selectors, nth).await?;
     let mut notes = Vec::new();
+
+    // A modal covering the page is dismissed first, rather than clicking
+    // through its backdrop: that happens to work on some sites and dies on any
+    // site that traps pointer events or focus.
+    let dismissed_modal = crate::modal::dismiss_if_present().await;
+    let target = if dismissed_modal.is_some() {
+        notes.push("dismissed a modal covering the page".to_string());
+        PageActionTarget::resolve_nth(scope, raw_selectors, nth).await?
+    } else {
+        target
+    };
+
     if target.scroll_into_view().await? {
         notes.push("scrolled into view first".to_string());
     }

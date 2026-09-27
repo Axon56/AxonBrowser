@@ -435,7 +435,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                             edge::page::actions::select_option(
                                 &scope,
                                 &inner.selectors,
-                                &inner.option
+                                &inner.option,
+                                inner.nth
                             )
                             .await?
                         );
@@ -941,7 +942,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                         firefox::page::actions::select_option(
                             &scope,
                             &inner.selectors,
-                            &inner.option
+                            &inner.option,
+                            inner.nth
                         )
                         .await?
                     );
@@ -1381,6 +1383,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         &scope,
                         &inner.selectors,
                         &inner.option,
+                        inner.nth,
                     )
                     .await?;
                     println!("{}", summary);

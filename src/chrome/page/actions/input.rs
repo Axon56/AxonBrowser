@@ -14,6 +14,16 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
     let target = PageActionTarget::resolve(scope, raw_selectors).await?;
 
     let mut notes = Vec::new();
+
+    // Dismiss a modal covering the page before reaching for the field, rather
+    // than typing through its backdrop.
+    let target = if crate::modal::dismiss_if_present().await.is_some() {
+        notes.push("dismissed a modal covering the page".to_string());
+        PageActionTarget::resolve(scope, raw_selectors).await?
+    } else {
+        target
+    };
+
     if target.scroll_into_view().await? {
         notes.push("scrolled into view first".to_string());
     }

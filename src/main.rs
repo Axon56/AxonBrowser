@@ -9,6 +9,7 @@ mod firefox;
 mod inspect;
 mod install;
 mod live_access;
+mod modal;
 mod model;
 mod overlay;
 mod render;
