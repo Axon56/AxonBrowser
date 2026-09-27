@@ -1,0 +1,155 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: Linux ${{ matrix.arch }} bundle
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: debian:12
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y curl ca-certificates build-essential pkg-config
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env"
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: |
+          set -euo pipefail
+          . "$HOME/.cargo/env"
+          cargo fmt --check
+
+      - name: Clippy
+        run: |
+          set -euo pipefail
+          . "$HOME/.cargo/env"
+          cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          . "$HOME/.cargo/env"
+          cargo test
+
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          . "$HOME/.cargo/env"
+          cargo build --release --bins
+
+      - name: Assemble release bundle
+        env:
+          BUNDLE_NAME: axonbrowser-linux-${{ matrix.arch }}
+          BUILD_BINARIES: "0"
+        run: |
+          set -euo pipefail
+          bash scripts/build-release-bundle.sh
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: axonbrowser-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            dist/release/axonbrowser-linux-${{ matrix.arch }}.tar.gz
+            dist/release/axonbrowser-linux-${{ matrix.arch }}.tar.gz.sha256
+
+  publish:
+    name: Publish latest build
+    needs: bundle
+    # Publish whatever bundles succeeded, so one failing architecture cannot
+    # withhold the others.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Collect bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+
+      - name: Add installer
+        run: |
+          set -euo pipefail
+          cp install.sh dist/release/install.sh
+          ls -l dist/release
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            Prebuilt AxonBrowser binaries from the latest `main`. No Rust
+            toolchain required.
+
+            ### Downloads
+
+            | Platform | Asset |
+            | --- | --- |
+            | Linux x86_64 | `axonbrowser-linux-x86_64.tar.gz` |
+            | Linux arm64 | `axonbrowser-linux-aarch64.tar.gz` |
+
+            Each bundle contains the `axonbrowser` binary plus the install and
+            runtime dependency scripts.
+
+            ### Install
+
+            ```bash
+            tar -xzf axonbrowser-linux-x86_64.tar.gz
+            sudo install -m 755 bin/axonbrowser /usr/local/bin/axonbrowser
+            axonbrowser install-deps
+            ```
+
+            `install-deps` installs the runtime packages AxonBrowser needs
+            (AT-SPI, Xvfb, ImageMagick, xdotool, and a browser).
+
+            Or let the installer script pick the right asset for you:
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            ```
+          files: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+            dist/release/install.sh

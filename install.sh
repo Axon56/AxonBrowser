@@ -85,9 +85,12 @@ main() {
     x86_64)
       bundle_name="axonbrowser-linux-x86_64"
       ;;
+    aarch64 | arm64)
+      bundle_name="axonbrowser-linux-aarch64"
+      ;;
     *)
       echo "install.sh: unsupported architecture: $arch" >&2
-      echo "install.sh: available release bundle: axonbrowser-linux-x86_64" >&2
+      echo "install.sh: available release bundles: axonbrowser-linux-x86_64, axonbrowser-linux-aarch64" >&2
       exit 1
       ;;
   esac
