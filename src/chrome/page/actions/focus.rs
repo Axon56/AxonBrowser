@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::chrome::actions::click::click_target_node;
+use crate::chrome::actions::click::click_target_node_with_root;
 use crate::chrome::page::root::PageScope;
 
 use super::{physical, target::PageActionTarget};
@@ -30,7 +30,9 @@ pub async fn focus(
             target.label, target.path
         )
     } else {
-        let click_summary = click_target_node(&target.node, &target.label, &target.path).await?;
+        let click_summary =
+            click_target_node_with_root(&target.node, &target.label, &target.path, &target.root)
+                .await?;
         format!(
             "focused {} via click fallback ({}) | {}",
             target.label, target.path, click_summary

@@ -27,8 +27,13 @@ pub async fn upload(scope: &PageScope, raw_selectors: &[String], path: &str) -> 
     } else if target.try_grab_focus().await? {
         format!("focused {} via AT-SPI grab-focus", target.label)
     } else {
-        crate::chrome::actions::click::click_target_node(&target.node, &target.label, &target.path)
-            .await?
+        crate::chrome::actions::click::click_target_node_with_root(
+            &target.node,
+            &target.label,
+            &target.path,
+            &target.root,
+        )
+        .await?
     };
 
     if target.try_set_text(&expanded.to_string_lossy()).await? {
@@ -47,8 +52,13 @@ pub async fn upload(scope: &PageScope, raw_selectors: &[String], path: &str) -> 
     let browser_window = target.browser_window().await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     let input_mode = if target.node.role.eq_ignore_ascii_case("push button") {
-        crate::chrome::actions::click::click_target_node(&target.node, &target.label, &target.path)
-            .await?;
+        crate::chrome::actions::click::click_target_node_with_root(
+            &target.node,
+            &target.label,
+            &target.path,
+            &target.root,
+        )
+        .await?;
         std::thread::sleep(Duration::from_millis(500));
         let chooser_window = window::find_window_by_title_contains("Open File").or_else(|_| {
             window::active_window_id().and_then(|id| {

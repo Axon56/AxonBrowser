@@ -24,8 +24,13 @@ pub async fn upload(scope: &PageScope, raw_selectors: &[String], path: &str) -> 
     } else if target.try_grab_focus().await? {
         format!("focused {} via AT-SPI grab-focus", target.label)
     } else {
-        crate::firefox::actions::click::click_target_node(&target.node, &target.label, &target.path)
-            .await?
+        crate::firefox::actions::click::click_target_node_with_root(
+            &target.node,
+            &target.label,
+            &target.path,
+            &target.root,
+        )
+        .await?
     };
 
     if target.try_set_text(&expanded.to_string_lossy()).await? {

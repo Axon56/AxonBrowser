@@ -23,6 +23,75 @@ pub trait ClickTarget {
     fn label(&self) -> &str;
 }
 
+/// A click target assembled from a node and the root it was resolved under.
+pub struct NodeTarget<'a> {
+    pub node: &'a LiveNode,
+    pub root: &'a LiveNode,
+    pub label: &'a str,
+}
+
+impl ClickTarget for NodeTarget<'_> {
+    fn node(&self) -> &LiveNode {
+        self.node
+    }
+
+    fn root(&self) -> &LiveNode {
+        self.root
+    }
+
+    fn label(&self) -> &str {
+        self.label
+    }
+}
+
+/// Whether this role is an editable field, where a click must leave it focused.
+pub fn is_text_input_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "entry" | "password text" | "text" | "text box" | "combo box"
+    )
+}
+
+/// Whether a node lives inside rendered page content rather than browser chrome.
+///
+/// Browser chrome (tool bar, tab strip) has no page to overlay it, so it does
+/// not need the page-level guard.
+pub fn is_page_content(node: &LiveNode) -> bool {
+    node.path.iter().any(|segment| {
+        let segment = segment.to_ascii_lowercase();
+        segment.contains("document web") || segment.contains("root web area")
+    })
+}
+
+/// Resolve a physical click point, guarding it when the node is page content.
+///
+/// `root` is the resolved page root for page content, and `None` for browser
+/// chrome. Page content goes through the full guard, so a click can never land
+/// on a sticky header, an overlay, or a stale position and still be reported as
+/// a success.
+pub async fn guarded_or_direct_click(
+    node: &LiveNode,
+    label: &str,
+    root: Option<&LiveNode>,
+) -> Result<(window::WindowMatch, i32, i32, Option<String>)> {
+    let (screen_x, screen_y) = inspect::clickable_point_stable(node).await?;
+    let browser_window = window::find_window_at_point(screen_x, screen_y)?;
+
+    match root {
+        Some(root) => {
+            let target = NodeTarget { node, root, label };
+            let (relative_x, relative_y, dismissed) =
+                guarded_click_point(&target, &browser_window).await?;
+            Ok((browser_window, relative_x, relative_y, dismissed))
+        }
+        None => {
+            let relative_x = screen_x - browser_window.x;
+            let relative_y = screen_y - browser_window.y;
+            Ok((browser_window, relative_x, relative_y, None))
+        }
+    }
+}
+
 /// Classify what owns a screen point relative to `target`.
 ///
 /// The hit test runs against the page root so the answer is the topmost element
@@ -70,9 +139,36 @@ pub async fn classify_point(
         return Ok(PointOwner::Related);
     }
 
+    // Anything drawn inside the target's own bounds is part of the target: a
+    // label or icon inside a button or link. This is a geometric test, so it
+    // holds regardless of how the toolkit arranges the tree.
+    if let (Ok(target_rect), Ok(hit_rect)) = (
+        inspect::component_extents(target).await,
+        inspect::extents_of_ref(&hit).await,
+    ) && contains_rect(target_rect, hit_rect)
+    {
+        return Ok(PointOwner::Related);
+    }
+
     Ok(PointOwner::Blocked {
         label: inspect::describe_ref(&hit).await,
     })
+}
+
+/// Whether `inner` lies within `outer`, allowing a small tolerance for
+/// sub-pixel rounding.
+fn contains_rect(outer: (i32, i32, i32, i32), inner: (i32, i32, i32, i32)) -> bool {
+    const TOLERANCE: i32 = 4;
+    let (ox, oy, ow, oh) = outer;
+    let (ix, iy, iw, ih) = inner;
+    if ow <= 0 || oh <= 0 || iw <= 0 || ih <= 0 {
+        return false;
+    }
+
+    ix >= ox - TOLERANCE
+        && iy >= oy - TOLERANCE
+        && ix + iw <= ox + ow + TOLERANCE
+        && iy + ih <= oy + oh + TOLERANCE
 }
 
 /// Resolve a click point for `target` in window-relative coordinates.

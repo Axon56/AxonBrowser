@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     chrome::{
-        actions::{click::click_target_node, context},
+        actions::{click::click_target_node_with_root, context},
         page::root::PageScope,
         window as chrome_window,
     },
@@ -20,7 +20,7 @@ pub async fn press_key(scope: &PageScope, raw_selectors: &[String], key: &str) -
     let focus_summary = if target.try_grab_focus().await? {
         format!("focused {} via AT-SPI grab-focus", target.label)
     } else {
-        click_target_node(&target.node, &target.label, &target.path).await?
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root).await?
     };
 
     let browser_window = target.browser_window().await?;
@@ -44,7 +44,9 @@ pub async fn press_enter(scope: &PageScope, raw_selectors: &[String]) -> Result<
 
     let target = PageActionTarget::resolve(scope, raw_selectors).await?;
     if target.node.role.eq_ignore_ascii_case("push button") {
-        let click_summary = click_target_node(&target.node, &target.label, &target.path).await?;
+        let click_summary =
+            click_target_node_with_root(&target.node, &target.label, &target.path, &target.root)
+                .await?;
         return Ok(format!(
             "activated {} via click fallback ({}) | {}",
             target.label, target.path, click_summary

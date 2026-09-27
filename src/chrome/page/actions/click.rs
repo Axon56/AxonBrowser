@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::chrome::actions::click::click_target_node;
+use crate::chrome::actions::click::click_target_node_with_root;
 
 use super::{physical, target::PageActionTarget};
 use crate::chrome::page::root::PageScope;
@@ -25,9 +25,17 @@ pub async fn click(
     };
 
     let summary = if physical::looks_like_text_input(&target.node.role) {
-        physical::mouse_click_target(&target).await?
+        // A refused or ineffective click must still report any navigation it
+        // caused: a misclick that changes the page destroys the form, and that
+        // is the most important thing for the caller to know.
+        match physical::mouse_click_target(&target).await {
+            Ok(summary) => summary,
+            Err(err) => {
+                return Err(describe_with_navigation(err, url_before, target.label.as_str()).await);
+            }
+        }
     } else {
-        click_target_node(&target.node, &target.label, &target.path).await?
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root).await?
     };
 
     if let Some(before) = url_before
@@ -46,6 +54,27 @@ pub async fn click(
         Ok(summary)
     } else {
         Ok(format!("{} | {}", summary, notes.join(", ")))
+    }
+}
+
+/// Enrich a click failure with any navigation it caused.
+async fn describe_with_navigation(
+    err: anyhow::Error,
+    url_before: Option<String>,
+    label: &str,
+) -> anyhow::Error {
+    let Some(before) = url_before else {
+        return err;
+    };
+    match crate::chrome::wait::current_url().await {
+        Ok(after) if after != before => anyhow::anyhow!(
+            "{}; the click also navigated from {:?} to {:?}, so it did not reach {}",
+            err,
+            before,
+            after,
+            label
+        ),
+        _ => err,
     }
 }
 

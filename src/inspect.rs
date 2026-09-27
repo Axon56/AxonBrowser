@@ -473,6 +473,27 @@ pub fn ref_name(reference: &ObjectRefOwned) -> &str {
     reference.name_as_str().unwrap_or_default()
 }
 
+/// Screen extents of an accessibility object reference.
+pub async fn extents_of_ref(reference: &ObjectRefOwned) -> Result<(i32, i32, i32, i32)> {
+    let connection = connect_accessibility().await?;
+    let accessible = reference
+        .as_accessible_proxy(connection.connection())
+        .await
+        .context("failed to bind object reference for extents lookup")?;
+    let proxies = accessible
+        .proxies()
+        .await
+        .context("failed to inspect object reference interfaces")?;
+    let component = proxies
+        .component()
+        .await
+        .context("object reference does not expose Component interface")?;
+    component
+        .get_extents(CoordType::Screen)
+        .await
+        .context("failed to read object reference extents")
+}
+
 /// Whether a node currently occupies space on screen.
 ///
 /// Hidden duplicates are common: a page with two date pickers exposes two

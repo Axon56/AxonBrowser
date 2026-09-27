@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use atspi::proxy::{accessible::ObjectRefExt, proxy_ext::ProxyExt};
 
-use crate::{inspect, model::LiveNode, window};
+use crate::{model::LiveNode, window};
 
 use super::context::{self, ActionTarget};
 
@@ -15,30 +15,65 @@ pub async fn click_target(target: &ActionTarget) -> Result<String> {
 }
 
 pub async fn click_target_node(node: &LiveNode, label: &str, path: &str) -> Result<String> {
+    // Page content is guarded against overlays, sticky headers, and stale
+    // positions. Browser chrome has no page layered over it, so a direct click
+    // is safe there.
+    let root = if crate::overlay::is_page_content(node) {
+        Some(crate::chrome::page::root::resolve_page_scope(&Default::default()).await?)
+    } else {
+        None
+    };
+
+    click_target_node_guarded(node, label, path, root.as_ref()).await
+}
+
+/// Click a page node with an already-resolved page root, so the physical
+/// fallback is guarded without walking the tree again.
+pub async fn click_target_node_with_root(
+    node: &LiveNode,
+    label: &str,
+    path: &str,
+    root: &LiveNode,
+) -> Result<String> {
+    click_target_node_guarded(node, label, path, Some(root)).await
+}
+
+async fn click_target_node_guarded(
+    node: &LiveNode,
+    label: &str,
+    path: &str,
+    root: Option<&LiveNode>,
+) -> Result<String> {
     if invoke_default_action(node).await? {
         return Ok(format!("clicked {} via AT-SPI action ({})", label, path));
     }
 
-    let (screen_x, screen_y) = inspect::clickable_point(node).await?;
-    let browser_window = window::find_window_at_point(screen_x, screen_y)?;
-    let relative_x = screen_x - browser_window.x;
-    let relative_y = screen_y - browser_window.y;
-    if relative_x < 0 || relative_y < 0 {
-        return Err(anyhow!(
-            "resolved click point landed outside the target window"
-        ));
-    }
-
+    let (browser_window, relative_x, relative_y, dismissed) =
+        crate::overlay::guarded_or_direct_click(node, label, root).await?;
     let activation_note = context::activate_window_note(&browser_window.id);
     window::mousemove_click(&browser_window.id, relative_x, relative_y)?;
+    if crate::overlay::is_text_input_role(&node.role) {
+        crate::overlay::verify_text_input_focus(node).await?;
+    }
 
-    Ok(format!(
+    let mut summary = format!(
         "clicked {} via X11 at {},{} in window {} ({}, {})",
         label, relative_x, relative_y, browser_window.id, path, activation_note
-    ))
+    );
+    if let Some(overlay) = dismissed {
+        summary = format!(
+            "{} | dismissed overlay {} before clicking",
+            summary, overlay
+        );
+    }
+    Ok(summary)
 }
 
-async fn invoke_default_action(node: &LiveNode) -> Result<bool> {
+/// Invoke the node's default accessibility action, if it exposes one.
+///
+/// This needs no coordinates, so it is immune to overlays and stale positions
+/// and is preferred over any physical click.
+pub(crate) async fn invoke_default_action(node: &LiveNode) -> Result<bool> {
     let connection = atspi::AccessibilityConnection::new()
         .await
         .context("failed to connect to the AT-SPI accessibility bus")?;

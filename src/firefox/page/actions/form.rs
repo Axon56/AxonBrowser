@@ -5,7 +5,7 @@ use atspi::State;
 use tokio::time::sleep;
 
 use crate::{
-    firefox::{actions::click::click_target_node, page::root::PageScope},
+    firefox::{actions::click::click_target_node_with_root, page::root::PageScope},
     selector, window,
 };
 
@@ -53,7 +53,9 @@ pub async fn select_option(
     }
 
     // Fall back to opening the control and clicking the option, then verify.
-    let open_summary = click_target_node(&target.node, &target.label, &target.path).await?;
+    let open_summary =
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root)
+            .await?;
     let option_selector = selector::Selector::parse(&format!("~{}", option))?;
     let option_node = crate::firefox::page::root::resolve_in_page_scope(scope, &[option_selector])
         .await?
@@ -62,7 +64,9 @@ pub async fn select_option(
         .ok_or_else(|| anyhow!("no page option matched {:?}", option))?;
     let option_label = option_node.line_label();
     let option_path = option_node.path.join(" > ");
-    let select_summary = click_target_node(&option_node, &option_label, &option_path).await?;
+    let select_summary =
+        click_target_node_with_root(&option_node, &option_label, &option_path, &target.root)
+            .await?;
 
     // Re-resolve the control before verifying: a native select can expose a
     // stale placeholder through AT-SPI while its value has already changed, so
@@ -129,7 +133,9 @@ async fn set_toggle(
         ));
     }
 
-    let action_summary = click_target_node(&target.node, &target.label, &target.path).await?;
+    let action_summary =
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root)
+            .await?;
     if !wait_for_checked_state(scope, raw_selectors, desired_checked).await? {
         bail!(
             "toggle state for {} did not change to {}",

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     firefox::{
-        actions::{click::click_target_node, context},
+        actions::{click::click_target_node_with_root, context},
         page::root::PageScope,
     },
     live_access, window,
@@ -109,7 +109,7 @@ async fn focus_for_typing(target: &PageActionTarget, role: &str) -> Result<Strin
     }
 
     // Last resort: the accessibility action interface, which needs no extents.
-    click_target_node(&target.node, &target.label, &target.path).await
+    click_target_node_with_root(&target.node, &target.label, &target.path, &target.root).await
 }
 
 /// Deliver text with the keyboard, returning a label for the mode used.

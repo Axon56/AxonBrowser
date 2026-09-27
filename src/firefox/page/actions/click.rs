@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::{thread, time::Duration};
 
-use crate::firefox::actions::click::click_target_node;
+use crate::firefox::actions::click::click_target_node_with_root;
 use crate::window;
 
 use super::{physical, target::PageActionTarget};
@@ -65,6 +65,20 @@ pub async fn click(
         match physical::mouse_click_target(&target).await {
             Ok(summary) => summary,
             Err(err) => {
+                // A failed click that navigated matters more than the fallback:
+                // it means the form state is about to be lost.
+                if let Some(before) = url_before.clone()
+                    && let Ok(after) = crate::firefox::wait::current_url().await
+                    && after != before
+                {
+                    return Err(anyhow::anyhow!(
+                        "{}; the click also navigated from {:?} to {:?}, so it did not reach {}",
+                        err,
+                        before,
+                        after,
+                        target.label
+                    ));
+                }
                 if physical::looks_like_text_input(&target.node.role) {
                     if target.try_grab_focus().await? {
                         format!(
@@ -94,7 +108,7 @@ pub async fn click(
             }
         }
     } else {
-        click_target_node(&target.node, &target.label, &target.path).await?
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root).await?
     };
 
     let notes_suffix = if notes.is_empty() {

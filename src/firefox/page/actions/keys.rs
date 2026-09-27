@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     firefox::{
-        actions::{click::click_target_node, context},
+        actions::{click::click_target_node_with_root, context},
         page::root::PageScope,
     },
     window,
@@ -19,7 +19,7 @@ pub async fn press_key(scope: &PageScope, raw_selectors: &[String], key: &str) -
     let focus_summary = if target.try_grab_focus().await? {
         format!("focused {} via AT-SPI grab-focus", target.label)
     } else {
-        click_target_node(&target.node, &target.label, &target.path).await?
+        click_target_node_with_root(&target.node, &target.label, &target.path, &target.root).await?
     };
 
     let browser_window = target.browser_window().await?;
