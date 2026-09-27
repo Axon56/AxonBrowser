@@ -7,11 +7,13 @@ use crate::{inspect, model::LiveNode, window};
 pub enum PointOwner {
     /// The point belongs to the target element itself.
     Target,
-    /// The point belongs to a child or an ancestor of the target, so a click
-    /// there still reaches the target.
+    /// The point belongs to the target's own label or another descendant, so a
+    /// click there still reaches the target.
     Related,
     /// Something else owns the point; the click would never reach the target.
     Blocked { label: String },
+    /// Ownership could not be established. Treated as unsafe, never as success.
+    Unknown,
 }
 
 /// Minimal view of a page action target needed to guard a click.
@@ -24,9 +26,12 @@ pub trait ClickTarget {
 /// Classify what owns a screen point relative to `target`.
 ///
 /// The hit test runs against the page root so the answer is the topmost element
-/// at that point, which is how a modal or promo popup is detected. When the
-/// relationship cannot be established the point is treated as related, so an
-/// unknown tree shape never causes a click to be refused.
+/// at that point, which is how a modal, promo popup, or sticky header is
+/// detected. Only the target itself or one of its own descendants counts as
+/// safe: an ancestor or unrelated element means the click would land somewhere
+/// else, and an unreadable hit test is treated as unsafe rather than assumed
+/// fine. Reporting a click that actually hit a navigation header is worse than
+/// refusing it.
 pub async fn classify_point(
     root: &LiveNode,
     target: &LiveNode,
@@ -34,7 +39,7 @@ pub async fn classify_point(
     screen_y: i32,
 ) -> Result<PointOwner> {
     let Some(hit) = inspect::accessible_at_point(root, screen_x, screen_y).await? else {
-        return Ok(PointOwner::Related);
+        return Ok(PointOwner::Unknown);
     };
 
     let hit_key = inspect::ref_key(&hit);
@@ -46,26 +51,10 @@ pub async fn classify_point(
     // button.
     let descendants = match inspect::descendant_refs(target, 4).await {
         Ok(descendants) => descendants,
-        // Could not enumerate the subtree, so there is not enough information to
-        // call this an overlay: never refuse a click we cannot prove is blocked.
-        Err(_) => return Ok(PointOwner::Related),
+        // Could not enumerate the subtree, so ownership is undetermined.
+        Err(_) => return Ok(PointOwner::Unknown),
     };
     if descendants
-        .iter()
-        .any(|reference| inspect::ref_key(reference) == hit_key)
-    {
-        return Ok(PointOwner::Related);
-    }
-
-    // ...or on a container the target sits inside.
-    let chain = match inspect::ancestor_chain(root, &target.object_ref).await {
-        Ok(chain) => chain,
-        Err(_) => return Ok(PointOwner::Related),
-    };
-    if chain.is_empty() {
-        return Ok(PointOwner::Related);
-    }
-    if chain
         .iter()
         .any(|reference| inspect::ref_key(reference) == hit_key)
     {
@@ -89,10 +78,12 @@ pub async fn classify_point(
 /// Resolve a click point for `target` in window-relative coordinates.
 ///
 /// Coordinates are re-read from freshly settled extents on every attempt, so a
-/// preceding scroll can never leave the caller clicking a stale position. If an
-/// overlay owns the point, it is dismissed and the point is re-resolved before
-/// retrying; if the target stays covered the click is refused instead of being
-/// sent into whatever is on top.
+/// preceding scroll can never leave the caller clicking a stale position. When
+/// the point is not owned by the target the page is nudged and the point
+/// re-resolved: an overlay is dismissed with Escape, and a target parked under
+/// a sticky header is scrolled back down into the viewport. If the target still
+/// cannot be reached the click is refused instead of being sent into whatever
+/// is on top.
 pub async fn guarded_click_point<T: ClickTarget>(
     target: &T,
     browser_window: &window::WindowMatch,
@@ -102,6 +93,11 @@ pub async fn guarded_click_point<T: ClickTarget>(
     let mut dismissed: Option<String> = None;
 
     for attempt in 0..ATTEMPTS {
+        // `scroll_to` parks the target at the nearest edge of the viewport,
+        // which is exactly where sticky headers and footers live. Move it to a
+        // safe band before considering the click.
+        reposition_if_at_edge(target, browser_window).await?;
+
         let (screen_x, screen_y) = inspect::clickable_point_stable(target.node()).await?;
         match classify_point(target.root(), target.node(), screen_x, screen_y).await? {
             PointOwner::Target | PointOwner::Related => {
@@ -112,22 +108,97 @@ pub async fn guarded_click_point<T: ClickTarget>(
                 }
                 return Ok((relative_x, relative_y, dismissed));
             }
-            PointOwner::Blocked { label } => {
+            owner @ (PointOwner::Blocked { .. } | PointOwner::Unknown) => {
                 if attempt + 1 < ATTEMPTS {
-                    dismissed = Some(label.clone());
+                    // Dismiss whatever is on top and try again from a fresh
+                    // position.
                     let _ = window::send_key(&browser_window.id, "Escape");
                     window::settle_after_input().await;
+                    if let PointOwner::Blocked { label } = &owner {
+                        dismissed = Some(label.clone());
+                    }
                 }
-                blocked = Some(label);
+                blocked = Some(match owner {
+                    PointOwner::Blocked { label } => label,
+                    _ => "an element that could not be identified".to_string(),
+                });
             }
         }
     }
 
     let blocker = blocked.unwrap_or_else(|| "an unknown element".to_string());
     bail!(
-        "click on {} is blocked by {}; dismissed the overlay and retried {} times without reaching the target",
+        "click on {} is blocked by {}; nudged the page and retried {} times without the target becoming clickable",
         target.label(),
         blocker,
         ATTEMPTS - 1
+    )
+}
+
+/// Keep the target inside a safe vertical band of the browser window.
+///
+/// Scroll-into-view aligns the target with the closest viewport edge, which
+/// puts it underneath sticky headers (or footers). Rather than trusting that
+/// position, nudge the page until the target sits in the middle of the window,
+/// where nothing overlaps it.
+async fn reposition_if_at_edge<T: ClickTarget>(
+    target: &T,
+    browser_window: &window::WindowMatch,
+) -> Result<()> {
+    // Fractions of the browser window height. The upper bound is deliberately
+    // generous: the window includes browser chrome, so the page area starts
+    // well below the window top.
+    const MIN_FRACTION: f64 = 0.35;
+    const MAX_FRACTION: f64 = 0.85;
+
+    let window_top = f64::from(browser_window.y);
+    let window_height = f64::from(browser_window.height.max(1));
+
+    for _ in 0..4 {
+        let (_, y, _, height) = inspect::stable_extents(target.node()).await?;
+        let center = f64::from(y) + f64::from(height) / 2.0;
+        let fraction = (center - window_top) / window_height;
+
+        let direction = if fraction < MIN_FRACTION {
+            // Too close to the top: bring it down.
+            window::ScrollDirection::Up
+        } else if fraction > MAX_FRACTION {
+            window::ScrollDirection::Down
+        } else {
+            return Ok(());
+        };
+
+        if window::scroll(&browser_window.id, direction, 1).is_err() {
+            return Ok(());
+        }
+        window::settle_after_input().await;
+    }
+
+    Ok(())
+}
+
+/// Confirm a click on an editable field actually took effect.
+///
+/// A click that is injected successfully but lands on something else otherwise
+/// looks like success. For an editable field the observable effect is focus, so
+/// a field that never takes focus is reported as a failure rather than a click.
+/// Focus can lag the click slightly, so it is polled before giving up.
+pub async fn verify_text_input_focus(node: &LiveNode) -> Result<()> {
+    for attempt in 0..6u64 {
+        let focused = inspect::read_state_set(node)
+            .await
+            .map(|states| states.contains(atspi::State::Focused))
+            .unwrap_or(false);
+        if focused {
+            return Ok(());
+        }
+        if attempt + 1 < 6 {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        }
+    }
+
+    bail!(
+        "click on {} did not take effect: the field never took focus, so the click landed on something else",
+        node.line_label()
     )
 }

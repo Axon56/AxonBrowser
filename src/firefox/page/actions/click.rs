@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{thread, time::Duration};
 
 use crate::firefox::actions::click::click_target_node;
@@ -35,6 +35,14 @@ pub async fn click(
     if target.scroll_into_view().await? {
         notes.push("scrolled into view first".to_string());
     }
+
+    // A click on a form control must never navigate. Capture the URL so an
+    // unintended navigation is reported instead of silently discarding the form.
+    let url_before = if form_control_click(&target.node.role) {
+        crate::firefox::wait::current_url().await.ok()
+    } else {
+        None
+    };
 
     let summary = if looks_like_click_button(&target.node.role) {
         match activate_button_via_focus_and_space(&target).await {
@@ -95,7 +103,37 @@ pub async fn click(
         format!(" | {}", notes.join(", "))
     };
 
+    if let Some(before) = url_before
+        && let Ok(after) = crate::firefox::wait::current_url().await
+        && after != before
+    {
+        bail!(
+            "click on {} unexpectedly navigated from {:?} to {:?}; the click did not reach the control",
+            target.label,
+            before,
+            after
+        );
+    }
+
     Ok(format!("{}{}", summary, notes_suffix))
+}
+
+/// Whether a click on this role is expected to stay on the same page.
+fn form_control_click(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "entry"
+            | "text"
+            | "text box"
+            | "password text"
+            | "combo box"
+            | "check box"
+            | "radio button"
+            | "list item"
+            | "menu item"
+            | "slider"
+            | "spin button"
+    )
 }
 
 fn is_textbox_selector(raw_selectors: &[String], name: &str) -> bool {

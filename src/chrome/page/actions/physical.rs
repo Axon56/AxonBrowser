@@ -19,6 +19,12 @@ pub async fn mouse_click_target_button(
     let activation_note = context::activate_window_note(&browser_window.id);
     window::mousemove_click_button(&browser_window.id, relative_x, relative_y, button, repeat)?;
 
+    // A plain left click on an editable field must leave it focused; otherwise
+    // the click landed somewhere else and must not be reported as a success.
+    if button == 1 && repeat == 1 && looks_like_text_input(&target.node.role) {
+        crate::overlay::verify_text_input_focus(&target.node).await?;
+    }
+
     let click_kind = match (button, repeat) {
         (1, 2) => "double-clicked".to_string(),
         (3, _) => "right-clicked".to_string(),

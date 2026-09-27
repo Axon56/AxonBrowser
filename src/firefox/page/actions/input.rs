@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::{
     firefox::{
@@ -59,6 +59,18 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
         notes.push("retried after the value did not verify".to_string());
     }
 
+    // Do not report success for text that never arrived: a false success here
+    // sends the caller on to submit an empty or wrong field.
+    if !text_landed(&target, text).await {
+        let observed = observed_value(&target).await;
+        bail!(
+            "typed into {} but the value did not verify after retrying; observed {:?}, expected {:?}",
+            target.label,
+            observed,
+            text
+        );
+    }
+
     Ok(attach_notes(
         format!(
             "typed into {} via {} in window {} ({}, {}, focus: {})",
@@ -71,6 +83,16 @@ pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) 
         ),
         &notes,
     ))
+}
+
+/// Read back whatever the field currently holds, for error reporting.
+async fn observed_value(target: &PageActionTarget) -> String {
+    if let Ok(Some(value)) = live_access::read_text(&target.node).await {
+        return value;
+    }
+    crate::inspect::node_text(&target.node)
+        .await
+        .unwrap_or_else(|| "<unreadable>".to_string())
 }
 
 /// Focus a field for typing, asking the accessibility tree first so inputs and

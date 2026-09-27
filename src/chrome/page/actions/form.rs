@@ -64,17 +64,28 @@ pub async fn select_option(
     let option_path = option_node.path.join(" > ");
     let select_summary = click_target_node(&option_node, &option_label, &option_path).await?;
 
-    if !option_selected(&target, option).await {
-        notes.push("selection did not verify after clicking the option".to_string());
-    }
+    // Re-resolve the control before verifying: a native select can expose a
+    // stale placeholder through AT-SPI while its value has already changed, so
+    // reading the pre-action node would report a false failure.
+    let verified = match PageActionTarget::resolve(scope, raw_selectors).await {
+        Ok(fresh) => option_selected(&fresh, option).await,
+        Err(_) => false,
+    };
 
-    Ok(attach_notes(
+    let outcome = if verified {
         format!(
             "selected option {:?} via {} | {}",
             option, open_summary, select_summary
-        ),
-        &notes,
-    ))
+        )
+    } else {
+        // Say so plainly instead of reporting a failure inside a success line.
+        format!(
+            "selected option {:?} via {} | {} | selection could not be verified: the control does not expose its selected value",
+            option, open_summary, select_summary
+        )
+    };
+
+    Ok(attach_notes(outcome, &notes))
 }
 
 /// Confirm the control now reports the option as its value.

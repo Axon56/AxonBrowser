@@ -136,11 +136,10 @@ fn canonical_role_name(role: &str) -> String {
 }
 
 fn roles_are_compatible(expected: &str, actual: &str) -> bool {
+    // Roles match exactly. Treating `entry` and `combo box` as interchangeable
+    // silently widened selectors: `Combo Box --nth 2` could land on a date
+    // `entry`, so positional matching changed meaning as a form changed state.
     expected == actual
-        || matches!(
-            (expected, actual),
-            ("entry", "combo box") | ("combo box", "entry")
-        )
 }
 
 fn contains_name_match(actual: &str, expected: &str) -> bool {
@@ -232,9 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn matches_combo_box_via_text_box_alias() {
-        let selector = Selector::parse("Text Box:Rech.").unwrap();
-        let node = UiNode::new("Combo Box", Some("Rech.".into()), vec![]);
-        assert!(selector.matches(&node));
+    fn roles_match_exactly() {
+        // `entry` and `combo box` are distinct roles, so a `Combo Box` selector
+        // must not also match date or text entries. Widening this silently
+        // changed which field `--nth` selected.
+        let combo = Selector::parse("Combo Box:Rech.").unwrap();
+        assert!(combo.matches(&UiNode::new("Combo Box", Some("Rech.".into()), vec![])));
+        assert!(!combo.matches(&UiNode::new("Entry", Some("Rech.".into()), vec![])));
+
+        let entry = Selector::parse("Text Box:Rech.").unwrap();
+        assert!(entry.matches(&UiNode::new("Entry", Some("Rech.".into()), vec![])));
+        assert!(!entry.matches(&UiNode::new("Combo Box", Some("Rech.".into()), vec![])));
     }
 }

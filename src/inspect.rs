@@ -473,6 +473,38 @@ pub fn ref_name(reference: &ObjectRefOwned) -> &str {
     reference.name_as_str().unwrap_or_default()
 }
 
+/// Whether a node currently occupies space on screen.
+///
+/// Hidden duplicates are common: a page with two date pickers exposes two
+/// identical day cells, and only one is showing. Acting on the hidden one looks
+/// like success while changing nothing, so callers use this to prefer the
+/// element the user can actually see.
+pub async fn is_showing(node: &LiveNode) -> bool {
+    if let Ok((_, _, width, height)) = component_extents(node).await
+        && width > 0
+        && height > 0
+    {
+        return true;
+    }
+
+    read_state_set(node)
+        .await
+        .map(|states| {
+            states.contains(atspi::State::Showing) || states.contains(atspi::State::Visible)
+        })
+        .unwrap_or(false)
+}
+
+/// First match that is actually on screen, if any.
+pub async fn first_showing(matches: &[LiveNode]) -> Option<LiveNode> {
+    for candidate in matches {
+        if is_showing(candidate).await {
+            return Some(candidate.clone());
+        }
+    }
+    None
+}
+
 /// Best-effort visible text for a node: its own name plus its descendants'.
 ///
 /// Custom widgets often expose their value as a child `Static` node rather than
@@ -595,62 +627,6 @@ async fn collect_descendant_refs(
     }
 
     Ok(())
-}
-
-/// Walk down from `root` and return the chain of references leading to
-/// `target`, including the target itself. Empty when the target is not found.
-pub async fn ancestor_chain(
-    root: &LiveNode,
-    target: &ObjectRefOwned,
-) -> Result<Vec<ObjectRefOwned>> {
-    let connection = connect_accessibility().await?;
-    let wanted = ref_key(target);
-    let mut chain = Vec::new();
-    if find_ref_chain(root, connection.connection(), &wanted, &mut chain).await? {
-        Ok(chain)
-    } else {
-        Ok(Vec::new())
-    }
-}
-
-#[async_recursion]
-async fn find_ref_chain(
-    node: &LiveNode,
-    conn: &atspi::zbus::Connection,
-    wanted: &str,
-    chain: &mut Vec<ObjectRefOwned>,
-) -> Result<bool> {
-    chain.push(node.object_ref.clone());
-    if ref_key(&node.object_ref) == wanted {
-        return Ok(true);
-    }
-
-    let Ok(accessible) = node.object_ref.as_accessible_proxy(conn).await else {
-        chain.pop();
-        return Ok(false);
-    };
-    let Ok(children) = accessible.get_children().await else {
-        chain.pop();
-        return Ok(false);
-    };
-
-    for child_ref in children {
-        if child_ref.is_null() {
-            continue;
-        }
-        let child = LiveNode {
-            object_ref: child_ref,
-            role: String::new(),
-            name: None,
-            path: node.path.clone(),
-        };
-        if find_ref_chain(&child, conn, wanted, chain).await? {
-            return Ok(true);
-        }
-    }
-
-    chain.pop();
-    Ok(false)
 }
 
 async fn bind_component(node: &LiveNode) -> Result<ComponentProxy<'_>> {

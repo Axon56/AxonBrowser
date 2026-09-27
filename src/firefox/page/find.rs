@@ -39,6 +39,14 @@ pub async fn find_nth(
         let selectors = raw_selectors.to_vec();
         async move {
             let matches = find(&scope, &selectors).await?;
+            // With no explicit index, prefer a match that is actually on
+            // screen: hidden duplicates (a second date picker's day cells, for
+            // example) would otherwise be acted on with no visible effect.
+            if nth.is_none()
+                && let Some(showing) = crate::inspect::first_showing(&matches).await
+            {
+                return Ok(showing);
+            }
             select_nth(matches, nth, "page")
         }
     })
