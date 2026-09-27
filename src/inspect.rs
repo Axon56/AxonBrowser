@@ -516,6 +516,147 @@ pub async fn is_showing(node: &LiveNode) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the accessibility tree considers this node able to be activated.
+///
+/// A control that cannot take focus is very likely disabled or decorative, and
+/// activating it does nothing. AT-SPI is not fully reliable here -- some pages
+/// report a disabled control as enabled and sensitive -- so this qualifies a
+/// success report rather than refusing the click.
+pub async fn is_actionable(node: &LiveNode) -> bool {
+    match read_state_set(node).await {
+        Ok(states) => states.contains(atspi::State::Focusable),
+        // Unreadable state is not evidence of a problem.
+        Err(_) => true,
+    }
+}
+
+/// A caveat to append when a click could not be confirmed as having an effect.
+pub async fn unverified_note(node: &LiveNode) -> Option<String> {
+    if is_actionable(node).await {
+        return None;
+    }
+
+    Some(format!(
+        "could not verify {} is actionable: the accessibility tree does not report it as focusable, so the click may have had no effect",
+        node.line_label()
+    ))
+}
+
+/// Label of a modal dialog that is hiding the rest of the page, if any.
+///
+/// When a modal opens, pages commonly mark the content behind it `aria-hidden`
+/// or `inert`. The browser then correctly removes that content from the
+/// accessibility tree, so the tree exposes only the dialog and every page
+/// lookup fails. Reporting the dialog turns a confusing "no page matches" into
+/// an actionable message, because the dialog's own controls are still present
+/// and can be used to dismiss it.
+pub async fn blocking_dialog(root: &LiveNode) -> Option<BlockingDialog> {
+    let children = descendant_refs(root, 2).await.ok()?;
+    if children.is_empty() {
+        return None;
+    }
+
+    for reference in &children {
+        let role = ref_role(reference).await?;
+        if role == "dialog" || role == "alert dialog" {
+            // `ObjectRefOwned::name_as_str` is the D-Bus sender, not the
+            // accessible name, so read the real name through the proxy.
+            let name = accessible_name(reference).await;
+            return Some(BlockingDialog {
+                label: line_label(&role, name.as_deref()),
+                dismiss_control: dialog_dismiss_control(reference).await,
+            });
+        }
+    }
+
+    None
+}
+
+/// A modal that is hiding the page behind it.
+#[derive(Debug, Clone)]
+pub struct BlockingDialog {
+    pub label: String,
+    /// The dialog's own close control, which stays reachable while the dialog
+    /// is open even though the rest of the page does not.
+    pub dismiss_control: Option<ObjectRefOwned>,
+}
+
+/// Find a control inside a dialog that dismisses it.
+async fn dialog_dismiss_control(dialog: &ObjectRefOwned) -> Option<ObjectRefOwned> {
+    const DISMISS_WORDS: &[&str] = &[
+        "close",
+        "dismiss",
+        "accept",
+        "reject",
+        "cancel",
+        "no thanks",
+        "not now",
+        "×",
+        "✕",
+    ];
+
+    let live = LiveNode {
+        object_ref: dialog.clone(),
+        role: String::new(),
+        name: None,
+        path: Vec::new(),
+    };
+    let descendants = descendant_refs(&live, 4).await.ok()?;
+
+    for reference in descendants {
+        let role = ref_role(&reference).await.unwrap_or_default();
+        if role != "push button" && role != "link" {
+            continue;
+        }
+        let Some(name) = accessible_name(&reference).await else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if DISMISS_WORDS.iter().any(|word| name.contains(word)) {
+            return Some(reference);
+        }
+    }
+
+    None
+}
+
+/// Invoke an object reference's default accessibility action.
+pub async fn invoke_action(reference: &ObjectRefOwned) -> bool {
+    let Ok(connection) = connect_accessibility().await else {
+        return false;
+    };
+    let Ok(accessible) = reference.as_accessible_proxy(connection.connection()).await else {
+        return false;
+    };
+    let Ok(proxies) = accessible.proxies().await else {
+        return false;
+    };
+    let Ok(action) = proxies.action().await else {
+        return false;
+    };
+    action.do_action(0).await.unwrap_or(false)
+}
+
+/// Accessible name of an object reference, read through its proxy.
+pub async fn accessible_name(reference: &ObjectRefOwned) -> Option<String> {
+    let connection = connect_accessibility().await.ok()?;
+    let accessible = reference
+        .as_accessible_proxy(connection.connection())
+        .await
+        .ok()?;
+    read_name(&accessible).await
+}
+
+/// Accessible role of an object reference, in the same casing as tree output.
+pub async fn ref_role(reference: &ObjectRefOwned) -> Option<String> {
+    let connection = connect_accessibility().await.ok()?;
+    let accessible = reference
+        .as_accessible_proxy(connection.connection())
+        .await
+        .ok()?;
+    Some(read_role(&accessible).await.to_ascii_lowercase())
+}
+
 /// First match that is actually on screen, if any.
 pub async fn first_showing(matches: &[LiveNode]) -> Option<LiveNode> {
     for candidate in matches {

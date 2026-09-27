@@ -117,7 +117,7 @@ async fn resolve_page_root_once() -> Result<LiveNode> {
     for chain in PAGE_ROOT_CHAINS {
         match resolve_chain(chain).await {
             Ok(nodes) if !nodes.is_empty() => {
-                return Ok(outermost_document(nodes));
+                return Ok(outermost_document(nodes).await);
             }
             Ok(_) => failures.push(format!("{} => no matches", format_chain(chain))),
             Err(err) => failures.push(format!("{} => {}", format_chain(chain), err)),
@@ -136,9 +136,42 @@ async fn resolve_page_root_once() -> Result<LiveNode> {
 /// frame's document as `Document Web` nodes. Taking the first match can select
 /// the nested document, which makes every page command silently target the
 /// iframe instead of the page, so prefer the shallowest candidate.
-fn outermost_document(mut nodes: Vec<LiveNode>) -> LiveNode {
-    nodes.sort_by_key(|node| node.path.len());
-    nodes.into_iter().next().expect("non-empty result")
+///
+/// A modal dialog is itself a document, so a page that opens one exposes a
+/// second candidate that covers only the dialog. Picking that one makes the
+/// whole page look like a handful of dialog nodes and every command report that
+/// nothing matches, so the shallowest candidate wins and ties are broken by
+/// preferring the one that contains the others.
+async fn outermost_document(nodes: Vec<LiveNode>) -> LiveNode {
+    let mut best: Option<LiveNode> = None;
+    for candidate in nodes {
+        best = Some(match best {
+            None => candidate,
+            Some(current) => {
+                if is_better_root(&candidate, &current).await {
+                    candidate
+                } else {
+                    current
+                }
+            }
+        });
+    }
+
+    best.expect("non-empty result")
+}
+
+/// Prefer the shallower document; on a tie prefer the one that encloses the
+/// other, which is the page rather than a dialog inside it.
+async fn is_better_root(candidate: &LiveNode, current: &LiveNode) -> bool {
+    if candidate.path.len() != current.path.len() {
+        return candidate.path.len() < current.path.len();
+    }
+
+    inspect::descendant_refs(candidate, 8)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|reference| inspect::ref_key(reference) == inspect::ref_key(&current.object_ref))
 }
 
 async fn resolve_page_root_from_edge_window() -> Result<LiveNode> {

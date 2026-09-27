@@ -66,6 +66,9 @@ async fn click_target_node_guarded(
             summary, overlay
         );
     }
+    if let Some(note) = crate::inspect::unverified_note(node).await {
+        summary = format!("{} | {}", summary, note);
+    }
     Ok(summary)
 }
 

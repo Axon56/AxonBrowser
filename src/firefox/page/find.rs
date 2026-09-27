@@ -38,7 +38,22 @@ pub async fn find_nth(
         let scope = scope.clone();
         let selectors = raw_selectors.to_vec();
         async move {
-            let matches = find(&scope, &selectors).await?;
+            let mut matches = find(&scope, &selectors).await?;
+            // A modal that hides the page removes it from the accessibility
+            // tree entirely, so nothing can match. Dismiss it and look again
+            // before reporting failure.
+            if matches.is_empty()
+                && let Some(dialog) = blocking_dialog_for(&scope).await
+            {
+                dismiss_blocking_dialog(&dialog).await;
+                matches = find(&scope, &selectors).await?;
+                if !matches.is_empty() {
+                    eprintln!(
+                        "dismissed blocking dialog {} before retrying the lookup",
+                        dialog.label
+                    );
+                }
+            }
             // With no explicit index, prefer a match that is actually on
             // screen: hidden duplicates (a second date picker's day cells, for
             // example) would otherwise be acted on with no visible effect.
@@ -47,14 +62,69 @@ pub async fn find_nth(
             {
                 return Ok(showing);
             }
+            if matches.is_empty() {
+                return Err(explain_empty_match(&scope).await);
+            }
             select_nth(matches, nth, "page")
         }
     })
     .await
 }
 
+/// Modal that is hiding the page, if there is one.
+async fn blocking_dialog_for(scope: &PageScope) -> Option<crate::inspect::BlockingDialog> {
+    let page_root = root::resolve_page_scope(scope).await.ok()?;
+    crate::inspect::blocking_dialog(&page_root).await
+}
+
+/// Dismiss a modal that is hiding the page.
+///
+/// The dialog's own controls stay reachable while the page behind it does not,
+/// so its close control is the reliable route; Escape is the fallback for
+/// dialogs that honour it.
+async fn dismiss_blocking_dialog(dialog: &crate::inspect::BlockingDialog) {
+    if let Some(control) = &dialog.dismiss_control
+        && crate::inspect::invoke_action(control).await
+    {
+        crate::window::settle_after_input().await;
+        return;
+    }
+
+    if let Ok(window) = crate::firefox::window::find_firefox_window(None) {
+        let _ = crate::window::send_key(&window.id, "Escape");
+        crate::window::settle_after_input().await;
+    }
+}
+
+/// Explain why nothing matched, naming a modal that is hiding the page.
+async fn explain_empty_match(scope: &PageScope) -> anyhow::Error {
+    match root::resolve_page_scope(scope).await {
+        Ok(page_root) => match crate::inspect::blocking_dialog(&page_root).await {
+            Some(dialog) => anyhow!(
+                "no page matches: {} is open and the page behind it is hidden from the accessibility tree; dismiss that dialog (its own controls are still reachable) and retry",
+                dialog.label
+            ),
+            None => anyhow!("no page matches"),
+        },
+        Err(_) => anyhow!("no page matches"),
+    }
+}
+
 pub async fn count(scope: &PageScope, raw_selectors: &[String]) -> Result<usize> {
-    Ok(find(scope, raw_selectors).await?.len())
+    let matches = find(scope, raw_selectors).await?;
+    if !matches.is_empty() {
+        return Ok(matches.len());
+    }
+
+    // A modal that hides the page makes every count come back zero. Dismiss it
+    // and count again rather than reporting an empty page.
+    if let Some(dialog) = blocking_dialog_for(scope).await {
+        dismiss_blocking_dialog(&dialog).await;
+        eprintln!("dismissed blocking dialog {} before counting", dialog.label);
+        return Ok(find(scope, raw_selectors).await?.len());
+    }
+
+    Ok(0)
 }
 
 pub fn select_nth(matches: Vec<LiveNode>, nth: Option<usize>, label: &str) -> Result<LiveNode> {
