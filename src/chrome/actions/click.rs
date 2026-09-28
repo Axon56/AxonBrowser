@@ -49,8 +49,29 @@ async fn click_target_node_guarded(
     // success while nothing changes, so this cannot be left to the tree.
     crate::dom::refuse_if_disabled(node, label).await?;
 
+    // A control with a checked state must actually change it. The action
+    // interface reports success whether or not anything happened -- a radio on a
+    // real booking form answered "clicked" while the page still showed the other
+    // option selected -- so the state is read first and checked after, and a
+    // physical click is tried when the action changed nothing.
+    let before = if crate::overlay::is_checkable_role(&node.role) {
+        crate::overlay::checked_state(node).await
+    } else {
+        None
+    };
+
     if invoke_default_action(node).await? {
-        return Ok(format!("clicked {} via AT-SPI action ({})", label, path));
+        match before {
+            // The state was readable and did move, so the click is confirmed.
+            Some(before) if crate::overlay::checked_state_changed(node, before).await => {
+                return Ok(format!("clicked {} via AT-SPI action ({})", label, path));
+            }
+            // Nothing to verify, so the action is all the evidence there is.
+            None => return Ok(format!("clicked {} via AT-SPI action ({})", label, path)),
+            // The action claimed success but the state did not move, so fall
+            // through to a physical click instead of reporting a no-op.
+            Some(_) => {}
+        }
     }
 
     let (browser_window, relative_x, relative_y, dismissed) =
@@ -59,6 +80,20 @@ async fn click_target_node_guarded(
     window::mousemove_click(&browser_window.id, relative_x, relative_y)?;
     if crate::overlay::is_text_input_role(&node.role) {
         crate::overlay::verify_text_input_focus(node).await?;
+    }
+
+    // Do not report a click whose whole purpose was to change a state when the
+    // state never changed.
+    if let Some(before) = before
+        && !crate::overlay::checked_state_changed(node, before).await
+    {
+        anyhow::bail!(
+            "clicked {} at {},{} in window {} but its state did not change, so the click had no effect",
+            label,
+            relative_x,
+            relative_y,
+            browser_window.id
+        );
     }
 
     let mut summary = format!(
@@ -82,9 +117,7 @@ async fn click_target_node_guarded(
 /// This needs no coordinates, so it is immune to overlays and stale positions
 /// and is preferred over any physical click.
 pub(crate) async fn invoke_default_action(node: &LiveNode) -> Result<bool> {
-    let connection = atspi::AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())

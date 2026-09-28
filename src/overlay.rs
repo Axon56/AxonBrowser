@@ -52,6 +52,91 @@ pub fn is_text_input_role(role: &str) -> bool {
     )
 }
 
+/// Whether this role's activation is observable as a checked state.
+pub fn is_checkable_role(role: &str) -> bool {
+    matches!(
+        role.trim().to_ascii_lowercase().as_str(),
+        "radio button" | "check box" | "toggle button" | "switch"
+    )
+}
+
+/// Whether this role's activation is observable as an opened dropdown.
+pub fn is_dropdown_role(role: &str) -> bool {
+    role.trim().eq_ignore_ascii_case("combo box")
+}
+
+/// Whether the control's dropdown opened, polling for the list to appear.
+///
+/// Opening the list is the observable effect of clicking a combo box. A custom
+/// dropdown is frequently a `div` that never takes keyboard focus, so a click
+/// that worked would otherwise be reported as having landed elsewhere.
+///
+/// Two signals are accepted. The control's own expanded state is the direct one,
+/// but its name often comes from a sibling label rather than an attribute, in
+/// which case no element matches that name. The set of visible lists is then
+/// compared instead, which needs no name at all: a new or changed list is the
+/// list this click opened.
+pub async fn dropdown_opened(node: &LiveNode, lists_before: Option<&str>) -> bool {
+    for attempt in 0..6u64 {
+        if crate::dom::control_expanded(node).await == Some(true) {
+            return true;
+        }
+        if let Some(before) = lists_before
+            && let Some(now) = crate::dom::visible_option_lists().await
+            && now != before
+        {
+            return true;
+        }
+        if attempt + 1 < 6 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    false
+}
+
+/// The control's checked state, from the page first and the accessibility tree
+/// second.
+///
+/// The page is authoritative here. The tree reports a radio group loosely: on a
+/// real booking form it described both options as checked, so comparing its
+/// answers before and after a click found no change and the click was written off
+/// as having had no effect even when the page had switched. The tree is still
+/// consulted when the page cannot answer, because a control whose accessible name
+/// does not match any element still has a state worth reporting.
+///
+/// `None` means the state could not be read, which callers must treat as
+/// "unknown" rather than as "unchecked".
+pub async fn checked_state(node: &LiveNode) -> Option<bool> {
+    if let Some(checked) = crate::dom::control_checked(node).await {
+        return Some(checked);
+    }
+
+    let states = inspect::read_state_set(node).await.ok()?;
+    Some(
+        states.contains(atspi::State::Checked)
+            || states.contains(atspi::State::Selected)
+            || states.contains(atspi::State::Pressed),
+    )
+}
+
+/// Whether the control's checked state moved away from `before`.
+///
+/// Polled, because the page applies the change asynchronously and a single read
+/// straight after the click can still describe the previous state.
+pub async fn checked_state_changed(node: &LiveNode, before: bool) -> bool {
+    for attempt in 0..6u64 {
+        if let Some(now) = checked_state(node).await
+            && now != before
+        {
+            return true;
+        }
+        if attempt + 1 < 6 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    false
+}
+
 /// Whether a node lives inside rendered page content rather than browser chrome.
 ///
 /// Browser chrome (tool bar, tab strip) has no page to overlay it, so it does
@@ -185,11 +270,12 @@ fn contains_rect(outer: (i32, i32, i32, i32), inner: (i32, i32, i32, i32)) -> bo
 ///
 /// Coordinates are re-read from freshly settled extents on every attempt, so a
 /// preceding scroll can never leave the caller clicking a stale position. When
-/// the point is not owned by the target the page is nudged and the point
-/// re-resolved: an overlay is dismissed with Escape, and a target parked under
-/// a sticky header is scrolled back down into the viewport. If the target still
-/// cannot be reached the click is refused instead of being sent into whatever
-/// is on top.
+/// the point is not owned by the target, or the page itself reports that a
+/// click there would hit a navigation link or a fixed overlay, the page is
+/// nudged and the point re-resolved: an overlay is dismissed with Escape, and a
+/// target parked under a sticky header is scrolled back to the middle of the
+/// viewport. If the target still cannot be reached the click is refused instead
+/// of being sent into whatever is on top.
 pub async fn guarded_click_point<T: ClickTarget>(
     target: &T,
     browser_window: &window::WindowMatch,
@@ -197,14 +283,42 @@ pub async fn guarded_click_point<T: ClickTarget>(
     const ATTEMPTS: usize = 3;
     let mut blocked = None;
     let mut dismissed: Option<String> = None;
+    // A link may legitimately be under the point when the target is that link,
+    // so the navigation check is only applied to other kinds of control.
+    let target_is_link = target.node().role.trim().eq_ignore_ascii_case("link");
 
     for attempt in 0..ATTEMPTS {
-        // `scroll_to` parks the target at the nearest edge of the viewport,
-        // which is exactly where sticky headers and footers live. Move it to a
-        // safe band before considering the click.
-        reposition_if_at_edge(target, browser_window).await?;
-
         let (screen_x, screen_y) = inspect::clickable_point_stable(target.node()).await?;
+
+        // Ask the page what a click at this point would actually hit. The
+        // accessibility hit test can name the target as the owner while the
+        // page's own hit test resolves the point to a sticky header sitting on
+        // top of it, and that is how a click on a form field silently opens a
+        // navigation menu instead. The page's answer is the one that decides.
+        if let Some(hit) =
+            crate::dom::point_hit(crate::dom::current_flavor(), screen_x, screen_y).await
+        {
+            let unreachable = if !hit.inside {
+                // Off screen entirely, so the extents describe a position the
+                // user cannot click.
+                Some("the target is outside the visible viewport".to_string())
+            } else if hit.link && !target_is_link {
+                Some("a navigation link is on top of the target".to_string())
+            } else if hit.overlay && !target_is_link {
+                Some("a fixed or sticky overlay is on top of the target".to_string())
+            } else {
+                None
+            };
+
+            if let Some(reason) = unreachable {
+                blocked = Some(reason);
+                if attempt + 1 < ATTEMPTS {
+                    center_target(target, browser_window, screen_x, screen_y).await?;
+                }
+                continue;
+            }
+        }
+
         match classify_point(target.root(), target.node(), screen_x, screen_y).await? {
             PointOwner::Target | PointOwner::Related => {
                 // The accessibility tree cannot always tell a disabled control
@@ -230,13 +344,19 @@ pub async fn guarded_click_point<T: ClickTarget>(
             }
             owner @ (PointOwner::Blocked { .. } | PointOwner::Unknown) => {
                 if attempt + 1 < ATTEMPTS {
-                    // Dismiss whatever is on top and try again from a fresh
-                    // position.
+                    // Dismiss whatever is on top, then move the target itself.
+                    // Both are needed: a popup is removed with Escape, while a
+                    // sticky header is not going anywhere, so the target has to
+                    // be brought out from under it. Without the reposition the
+                    // retry re-resolves the same covered point and fails again,
+                    // which is how a field parked at the top edge stayed
+                    // unclickable no matter how many times the click was retried.
                     let _ = window::send_key(&browser_window.id, "Escape");
                     window::settle_after_input().await;
                     if let PointOwner::Blocked { label } = &owner {
                         dismissed = Some(label.clone());
                     }
+                    center_target(target, browser_window, screen_x, screen_y).await?;
                 }
                 blocked = Some(match owner {
                     PointOwner::Blocked { label } => label,
@@ -248,52 +368,40 @@ pub async fn guarded_click_point<T: ClickTarget>(
 
     let blocker = blocked.unwrap_or_else(|| "an unknown element".to_string());
     bail!(
-        "click on {} is blocked by {}; nudged the page and retried {} times without the target becoming clickable",
+        "click on {} is blocked by {}; nudged the page and retried {} times without the target becoming clickable, so the click was not sent",
         target.label(),
         blocker,
         ATTEMPTS - 1
     )
 }
 
-/// Keep the target inside a safe vertical band of the browser window.
+/// Move the target to the middle of the viewport so sticky chrome cannot cover
+/// it.
 ///
-/// Scroll-into-view aligns the target with the closest viewport edge, which
-/// puts it underneath sticky headers (or footers). Rather than trusting that
-/// position, nudge the page until the target sits in the middle of the window,
-/// where nothing overlaps it.
-async fn reposition_if_at_edge<T: ClickTarget>(
+/// Scroll-into-view aligns the target with the closest viewport edge, which puts
+/// it underneath sticky headers (or footers). The correction is computed in the
+/// page's own coordinates and applied with a page scroll, because a scroll wheel
+/// nudge moves by an unknown amount and can leave the target exactly where it
+/// was. The wheel is kept as a fallback for pages the DOM cannot be queried on.
+async fn center_target<T: ClickTarget>(
     target: &T,
     browser_window: &window::WindowMatch,
+    screen_x: i32,
+    screen_y: i32,
 ) -> Result<()> {
-    // Fractions of the browser window height. The upper bound is deliberately
-    // generous: the window includes browser chrome, so the page area starts
-    // well below the window top.
-    const MIN_FRACTION: f64 = 0.35;
-    const MAX_FRACTION: f64 = 0.85;
-
-    let window_top = f64::from(browser_window.y);
-    let window_height = f64::from(browser_window.height.max(1));
-
-    for _ in 0..4 {
-        let (_, y, _, height) = inspect::stable_extents(target.node()).await?;
-        let center = f64::from(y) + f64::from(height) / 2.0;
-        let fraction = (center - window_top) / window_height;
-
-        let direction = if fraction < MIN_FRACTION {
-            // Too close to the top: bring it down.
-            window::ScrollDirection::Up
-        } else if fraction > MAX_FRACTION {
-            window::ScrollDirection::Down
-        } else {
-            return Ok(());
-        };
-
-        if window::scroll(&browser_window.id, direction, 1).is_err() {
-            return Ok(());
-        }
+    // The control is found by its accessible name, not by the point: the point
+    // is exactly what the occluder has taken over, so asking the page about it
+    // returns the header and finds nothing to scroll.
+    let name = target.node().name.as_deref().unwrap_or_default().trim();
+    if crate::dom::bring_into_view(crate::dom::current_flavor(), name, screen_x, screen_y).await {
         window::settle_after_input().await;
+        return Ok(());
     }
 
+    // The page could not be reached, or it had nothing left to scroll. Fall back
+    // to nudging the scroll wheel, which is imprecise but better than giving up.
+    let _ = window::scroll(&browser_window.id, window::ScrollDirection::Up, 1);
+    window::settle_after_input().await;
     Ok(())
 }
 
@@ -303,22 +411,88 @@ async fn reposition_if_at_edge<T: ClickTarget>(
 /// looks like success. For an editable field the observable effect is focus, so
 /// a field that never takes focus is reported as a failure rather than a click.
 /// Focus can lag the click slightly, so it is polled before giving up.
-pub async fn verify_text_input_focus(node: &LiveNode) -> Result<()> {
+///
+/// Focus is only evidence when it *changed*. If the field was already focused
+/// before the click -- which happens whenever an earlier command focused it --
+/// then observing focus proves nothing, and reporting success would be the same
+/// false success this check exists to prevent. In that case the caller's
+/// pre-click checks are the only real evidence, so the outcome is reported as
+/// unverified rather than confirmed.
+pub async fn verify_text_input_focus_after(
+    node: &LiveNode,
+    was_focused_before: bool,
+) -> Result<FocusOutcome> {
+    let focused = focus_is_settled(node).await;
+    if !focused {
+        bail!(
+            "click on {} did not take effect: the field never took focus, so the click landed on something else",
+            node.line_label()
+        );
+    }
+
+    Ok(if was_focused_before {
+        FocusOutcome::AlreadyFocused
+    } else {
+        FocusOutcome::FocusGained
+    })
+}
+
+/// How a click's focus effect was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusOutcome {
+    /// The click moved focus onto the field, which proves it landed there.
+    FocusGained,
+    /// The field already had focus, so focus is not evidence either way.
+    AlreadyFocused,
+}
+
+/// Whether the field reports itself as focused, polling briefly for it to settle.
+async fn focus_is_settled(node: &LiveNode) -> bool {
     for attempt in 0..6u64 {
-        let focused = inspect::read_state_set(node)
+        if inspect::read_state_set(node)
             .await
             .map(|states| states.contains(atspi::State::Focused))
-            .unwrap_or(false);
-        if focused {
-            return Ok(());
+            .unwrap_or(false)
+        {
+            return true;
         }
         if attempt + 1 < 6 {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         }
+    }
+    false
+}
+
+pub async fn verify_text_input_focus(node: &LiveNode) -> Result<()> {
+    if focus_is_settled(node).await {
+        return Ok(());
     }
 
     bail!(
         "click on {} did not take effect: the field never took focus, so the click landed on something else",
         node.line_label()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_checkable_role, is_text_input_role};
+
+    #[test]
+    fn checkable_roles_are_the_ones_with_an_observable_state() {
+        assert!(is_checkable_role("Radio Button"));
+        assert!(is_checkable_role("Check Box"));
+        assert!(is_checkable_role("Toggle Button"));
+        // A plain button has no state to verify, so it must not be treated as
+        // checkable: doing so would demand a change that never comes.
+        assert!(!is_checkable_role("Push Button"));
+        assert!(!is_checkable_role("Entry"));
+    }
+
+    #[test]
+    fn text_input_roles_include_the_editable_controls() {
+        assert!(is_text_input_role("Entry"));
+        assert!(is_text_input_role("Combo Box"));
+        assert!(!is_text_input_role("Push Button"));
+    }
 }

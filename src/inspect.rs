@@ -126,9 +126,7 @@ async fn resolve_within_scopes(
         return Ok(scopes);
     }
 
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = connect_accessibility().await?;
 
     for selector in selectors {
         let mut next = Vec::new();
@@ -158,15 +156,38 @@ async fn ensure_accessibility_enabled() -> Result<()> {
     Ok(())
 }
 
-async fn connect_accessibility() -> Result<AccessibilityConnection> {
-    match AccessibilityConnection::new().await {
-        Ok(connection) => Ok(connection),
-        Err(_) => {
+/// How long a single attempt to reach the accessibility bus may take.
+///
+/// Connecting is a D-Bus round trip, and a bus that is half-dead -- reachable but
+/// not answering -- would otherwise block forever, which makes a command hang
+/// with no output and no way to tell a slow page from a dead bus. Bounding the
+/// attempt turns that into a prompt, reportable failure.
+const ACCESSIBILITY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect to the accessibility bus, repairing the stack once if needed.
+///
+/// Public because the click paths in every browser module need the same bounded
+/// behaviour; connecting directly bypasses both the timeout and the repair.
+pub async fn connect_accessibility() -> Result<AccessibilityConnection> {
+    match tokio::time::timeout(
+        ACCESSIBILITY_CONNECT_TIMEOUT,
+        AccessibilityConnection::new(),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => Ok(connection),
+        // A timed-out attempt is treated like a failed one, so the repair path
+        // runs and the caller gets a real error rather than a stall.
+        Ok(Err(_)) | Err(_) => {
             crate::runtime::repair_accessibility_stack()
                 .context("failed to repair the AT-SPI accessibility stack")?;
-            AccessibilityConnection::new()
-                .await
-                .context("failed to connect to the AT-SPI accessibility bus")
+            tokio::time::timeout(
+                ACCESSIBILITY_CONNECT_TIMEOUT,
+                AccessibilityConnection::new(),
+            )
+            .await
+            .context("timed out connecting to the AT-SPI accessibility bus")?
+            .context("failed to connect to the AT-SPI accessibility bus")
         }
     }
 }
@@ -338,12 +359,10 @@ async fn build_tree_inner(
     let role = read_role(node).await;
     let name = read_name(node).await;
 
-    // Cycle detection is scoped to the current path, not to the whole walk.
-    // A single visited set keyed by object reference silently dropped subtrees:
-    // Chrome recycles references for virtualized and re-rendered nodes, so the
-    // second appearance of a reference was emitted without its children. That
-    // is how a search input inside a dropdown went missing from the tree while
-    // Chrome's own tree still exposed it.
+    // A reference already on this branch is a true cycle. A reference seen
+    // elsewhere is walked again: Chrome recycles references for virtualized and
+    // re-rendered nodes, so a second appearance can have genuinely different
+    // children, and skipping it is what used to drop whole subtrees.
     let key = node_key(node);
     if budget.on_path.contains(&key) || !budget.charge() {
         return Ok(UiNode::new(role, name, Vec::new()));
@@ -376,25 +395,46 @@ async fn build_tree_inner(
 
 /// Bounds a tree walk without dropping nodes.
 ///
-/// `on_path` holds the references on the current branch, which detects a true
-/// cycle, and `remaining` caps total work so a pathological tree cannot run
-/// forever. Neither can silently truncate an unrelated subtree the way a global
-/// visited set did.
+/// Two limits, each catching a different failure:
+///
+/// * `on_path` holds the references on the current branch, which detects a true
+///   cycle. It is scoped to the path rather than the whole walk because Chrome
+///   recycles references for virtualized and re-rendered nodes: a single global
+///   visited set emitted the second appearance without its children, which is how
+///   a search input inside an open dropdown went missing from the tree.
+/// * `deadline` caps wall-clock time. Each node costs several D-Bus round trips,
+///   so a node count alone is not a time bound, and a walk that overruns must
+///   return a partial tree rather than hang the command.
+///
+/// There is deliberately no per-reference expansion cap. Counting visits sounds
+/// safer but truncates real pages: a node that legitimately reappears through a
+/// recycled reference loses its subtree on the third appearance, and a page that
+/// normally exposes hundreds of controls comes back with a fraction of them. The
+/// node budget and the deadline already bound the work.
 struct TreeBudget {
     on_path: Vec<String>,
     remaining: usize,
+    deadline: std::time::Instant,
 }
 
 impl TreeBudget {
+    /// Total nodes the walk may emit. Sized so a real page is never truncated:
+    /// the pages this tool drives expose a few hundred to a few thousand nodes.
+    const MAX_NODES: usize = 20_000;
+    /// Wall-clock budget for one walk.
+    const BUDGET: Duration = Duration::from_secs(20);
+
     fn new() -> Self {
         Self {
             on_path: Vec::new(),
-            remaining: 20_000,
+            remaining: Self::MAX_NODES,
+            deadline: std::time::Instant::now() + Self::BUDGET,
         }
     }
 
+    /// Whether another node may be walked, consuming budget when it may.
     fn charge(&mut self) -> bool {
-        if self.remaining == 0 {
+        if self.remaining == 0 || std::time::Instant::now() >= self.deadline {
             return false;
         }
         self.remaining -= 1;
@@ -454,14 +494,19 @@ pub async fn stable_extents(node: &LiveNode) -> Result<(i32, i32, i32, i32)> {
     let mut previous: Option<(i32, i32, i32, i32)> = None;
     let mut last: Option<(i32, i32, i32, i32)> = None;
 
-    for attempt in 0..6u64 {
+    // A page with `scroll-behavior: smooth` animates a scroll for hundreds of
+    // milliseconds, so the first reads after a scroll still describe the old
+    // position. Waiting for two consecutive reads to agree is what makes the
+    // coordinates trustworthy, so the loop is long enough to outlast an
+    // animation rather than giving up while the target is still moving.
+    for attempt in 0..12u64 {
         let extents = component_extents(node).await?;
         if previous == Some(extents) {
             return Ok(extents);
         }
         previous = Some(extents);
         last = Some(extents);
-        sleep(Duration::from_millis(50 + attempt * 40)).await;
+        sleep(Duration::from_millis(50 + (attempt * 25).min(200))).await;
     }
 
     last.ok_or_else(|| anyhow!("failed to read component extents"))
@@ -596,20 +641,75 @@ pub async fn blocking_dialog(root: &LiveNode) -> Option<BlockingDialog> {
         return None;
     }
 
+    // A covering element is not always exposed as a dialog. Site builders wrap
+    // their popups in frames and panels, and one was reported covering the page
+    // as a `Document Frame`. Matching every such role is not an option either:
+    // ordinary content sections carry those same roles, so treating them as
+    // modals dismissed the page itself and refused clicks on plain content.
+    //
+    // The page is asked what is actually covering it, and that answer decides.
+    // It reports only a declared modal dialog or a full-viewport fixed layer, so
+    // a sticky header and a content section are both correctly ignored.
+    let covered = crate::dom::covering_overlay().await;
+    covered.as_ref()?;
+
+    // The page knows a cover exists; the tree says what it is and, more
+    // importantly, which control closes it. The cover is matched by name so the
+    // right node is picked when several dialogs are in the markup.
+    let wanted = covered.as_deref().unwrap_or_default();
+    let wanted_name = wanted
+        .split_once('"')
+        .and_then(|(_, rest)| rest.strip_suffix('"'))
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    let mut fallback: Option<BlockingDialog> = None;
     for reference in &children {
-        let role = ref_role(reference).await?;
-        if role == "dialog" || role == "alert dialog" {
-            // `ObjectRefOwned::name_as_str` is the D-Bus sender, not the
-            // accessible name, so read the real name through the proxy.
-            let name = accessible_name(reference).await;
-            return Some(BlockingDialog {
-                label: line_label(&role, name.as_deref()),
-                dismiss_control: dialog_dismiss_control(reference).await,
-            });
+        let Some(role) = ref_role(reference).await else {
+            continue;
+        };
+        if role != "dialog" && role != "alert dialog" && role != "document frame" && role != "frame"
+        {
+            continue;
+        }
+
+        // `ObjectRefOwned::name_as_str` is the D-Bus sender, not the accessible
+        // name, so read the real name through the proxy.
+        let name = accessible_name(reference).await;
+        let candidate = BlockingDialog {
+            label: line_label(&role, name.as_deref()),
+            dismiss_control: dialog_dismiss_control(reference).await,
+        };
+
+        // Prefer the node the page named, when it has a name to match on.
+        let name_matches = !wanted_name.is_empty()
+            && name
+                .as_deref()
+                .map(|name| name.to_ascii_lowercase().contains(&wanted_name))
+                .unwrap_or(false);
+        if name_matches && candidate.dismiss_control.is_some() {
+            return Some(candidate);
+        }
+
+        // Otherwise anything we can actually close will do, since the page has
+        // already confirmed that something is covering it.
+        if candidate.dismiss_control.is_some() {
+            return Some(candidate);
+        }
+        if fallback.is_none() {
+            fallback = Some(candidate);
         }
     }
 
-    None
+    // Nothing in the tree carries a close control, so report the cover by the
+    // name the page gave it rather than pretending there is nothing there.
+    fallback.or_else(|| {
+        Some(BlockingDialog {
+            label: wanted.to_string(),
+            dismiss_control: None,
+        })
+    })
 }
 
 /// A modal that is hiding the page behind it.
@@ -832,9 +932,7 @@ async fn collect_descendant_refs(
 }
 
 async fn bind_component(node: &LiveNode) -> Result<ComponentProxy<'_>> {
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())

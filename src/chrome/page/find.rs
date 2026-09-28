@@ -95,7 +95,11 @@ async fn explain_empty_match(scope: &PageScope) -> anyhow::Error {
             ),
             None => anyhow!("no page matches"),
         },
-        Err(_) => anyhow!("no page matches"),
+        // The page root itself could not be resolved, so the failure is not a
+        // missing selector. Report what actually went wrong instead of the
+        // unhelpful "no page matches", which sends the caller hunting for a
+        // locator problem that does not exist.
+        Err(err) => err,
     }
 }
 

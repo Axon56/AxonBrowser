@@ -5,6 +5,13 @@ use tokio::time::sleep;
 
 const DEFAULT_ATTEMPTS: usize = 6;
 const DEFAULT_DELAY_MS: u64 = 150;
+/// Cap on the backoff between re-reads. The accessibility tree can come back
+/// empty while a page is still settling, and that gap is measured in hundreds of
+/// milliseconds, so the wait grows but stays bounded. The cap is deliberately
+/// small: these retries absorb a blip, and when the bus is genuinely gone no
+/// amount of waiting helps, so a long backoff only makes the command appear to
+/// hang before reporting the same failure.
+const MAX_DELAY_MS: u64 = 400;
 
 pub async fn with_transient_retry<T, F, Fut>(mut op: F) -> Result<T>
 where
@@ -22,7 +29,10 @@ where
                     return Err(err);
                 }
 
-                sleep(Duration::from_millis(DEFAULT_DELAY_MS)).await;
+                let delay = DEFAULT_DELAY_MS
+                    .saturating_mul(1 << (attempt - 1).min(4))
+                    .min(MAX_DELAY_MS);
+                sleep(Duration::from_millis(delay)).await;
                 attempt += 1;
             }
         }
@@ -66,14 +76,19 @@ pub fn is_transient_accessibility_error(message: &str) -> bool {
         "org.freedesktop.dbus.error.servicename",
         "the name :1.",
         "timed out waiting for reply",
-        r#"no accessible application or window matched query "chrome""#,
-        "no accessible application or window matched any edge query",
-        "no accessible application or window matched any firefox query",
+        // One prefix covers every browser: the query text after it changed when
+        // the lookup was unified, and matching the old wording meant this retry
+        // never ran for the message the code actually produces. A tree that came
+        // back empty is the case it exists for, so it must not depend on which
+        // browser phrased it.
+        "no accessible application or window matched",
         "no visible chrome/chromium window found",
         "no visible microsoft edge window found",
         "no chrome tabs matched",
         "failed to get the at-spi registry root",
         "failed to list desktop applications from the at-spi registry",
+        "failed to read children",
+        "failed to bind child proxy",
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
@@ -108,6 +123,23 @@ mod tests {
     fn classifies_missing_firefox_tree_as_transient() {
         assert!(is_transient_accessibility_error(
             "no accessible application or window matched any firefox query"
+        ));
+    }
+
+    #[test]
+    fn classifies_the_unified_browser_query_failure_as_transient() {
+        // This is the message the page-root lookup actually produces. Matching
+        // only the older per-browser wording left the retry dead for the one
+        // failure it exists to absorb.
+        assert!(is_transient_accessibility_error(
+            "failed to resolve chrome page root; tried Document Web => no accessible application or window matched any browser query"
+        ));
+    }
+
+    #[test]
+    fn classifies_a_dropped_subtree_read_as_transient() {
+        assert!(is_transient_accessibility_error(
+            "failed to read children for Accessible { name: \"form\" }"
         ));
     }
 

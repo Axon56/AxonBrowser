@@ -1,13 +1,15 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Sticky Header Hard Demo</title>
+<head><meta charset="utf-8"><title>Sticky Offscreen Demo</title>
 <style>
   body { margin: 0; font-family: sans-serif; }
-  /* A tall sticky header: scroll-into-view parks the field underneath it. */
+  /* 260px sticky header holding navigation links, like a real booking site. */
   #nav { position: sticky; top: 0; height: 260px; background: #123; z-index: 100; }
   #nav a { display: block; height: 130px; line-height: 130px; padding-left: 20px;
-           color: #fff; text-decoration: none; }
-  #spacer { height: 1400px; background: #eee; }
+           color: #fff; text-decoration: none; font-size: 28px; }
+  /* Enough filler that the form starts well below the fold, so
+     scroll-into-view actually has to scroll and parks it at the top edge. */
+  #spacer { height: 2400px; background: #eee; }
   #form { padding: 20px; }
   label { display: block; margin-top: 12px; }
 </style>
@@ -19,14 +21,14 @@
 </nav>
 <div id="spacer">scroll filler</div>
 <div id="form">
-  <h1>Sticky Header Hard Demo</h1>
+  <h1>Sticky Offscreen Demo</h1>
   <label for="departure-date">Departure date</label>
-  <input id="departure-date" type="text" placeholder="DD MMM YYYY">
+  <input id="departure-date" type="text" placeholder="DD MMM YYYY" readonly>
+  <label for="origin">Origin</label>
+  <input id="origin" type="text">
   <p id="status">Nothing clicked yet.</p>
+  <button id="confirm">Confirm Booking</button>
 </div>
-<!-- Enough content after the form that the page can scroll far enough to park
-     the field underneath the sticky header, which is the failure being tested. -->
-<div style="height: 2000px; background: #ddd;">footer filler</div>
 <script>
   document.getElementById('departure-date').addEventListener('click', function () {
     document.getElementById('status').textContent = 'Departure date clicked.';

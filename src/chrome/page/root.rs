@@ -42,8 +42,31 @@ impl PageScope {
 }
 
 pub async fn inspect_page_in_scope(scope: &PageScope) -> Result<UiNode> {
-    let root = resolve_page_scope(scope).await?;
-    inspect::inspect_live(&root).await
+    // The accessibility tree intermittently comes back without the page's
+    // contents -- a widget that is still initialising, or a tree read that lost
+    // the subtree -- and a single read is not trustworthy. An empty tree is
+    // re-read with backoff rather than being reported as a page with nothing on
+    // it, because that report sends the caller away thinking the page has no
+    // controls when it does.
+    //
+    // Only an empty tree is retried. Re-walking a tree that came back populated
+    // would double the cost of every inspection for no benefit, and on a large
+    // page that is the difference between a command that answers and one that
+    // appears to hang.
+    let mut last = None;
+    for attempt in 0..2u64 {
+        let root = resolve_page_scope(scope).await?;
+        let tree = inspect::inspect_live(&root).await?;
+        if !tree.children.is_empty() {
+            return Ok(tree);
+        }
+        last = Some(tree);
+        if attempt < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    Ok(last.expect("the loop runs at least once"))
 }
 
 pub async fn resolve_in_page_scope(
@@ -124,9 +147,23 @@ async fn resolve_page_root_once() -> Result<LiveNode> {
         }
     }
 
+    let detail = failures.join("; ");
+    // A window on screen with no accessibility tree means the browser is running
+    // but is no longer registered with the accessibility bus, which happens when
+    // the bus restarts underneath it. That is a different problem from a page
+    // that simply has no matching content, and saying which one it is saves the
+    // caller from chasing a selector that was never the issue.
+    if let Ok(window) = chrome_window::find_browser_window(None)
+        && !window.name.is_empty()
+    {
+        return Err(anyhow!(
+            "failed to resolve chrome page root; tried {detail}. A browser window ({}) is on screen but the accessibility tree is empty, which means the browser is not registered with the accessibility bus any more -- restart the browser to re-register it",
+            window.name
+        ));
+    }
+
     Err(anyhow!(
-        "failed to resolve chrome page root; tried {}",
-        failures.join("; ")
+        "failed to resolve chrome page root; tried {detail}"
     ))
 }
 

@@ -342,55 +342,22 @@ fn default_xdg_runtime_dir() -> Option<String> {
 }
 
 fn warm_accessibility_bus(env: &BTreeMap<String, String>, dir: &Path) -> Result<()> {
+    // This runs while a session is being created, before any browser has been
+    // launched, so clearing a stale bus from an earlier session is safe here. It
+    // is deliberately not done during repair, where a browser is already running
+    // and would be left unregistered.
     let _ = terminate_accessibility_processes();
+    enable_accessibility_flags(env)?;
 
-    let status = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--dest=org.a11y.Bus",
-            "--type=method_call",
-            "--print-reply",
-            "/org/a11y/bus",
-            "org.freedesktop.DBus.Properties.Set",
-            "string:org.a11y.Status",
-            "string:IsEnabled",
-            "variant:boolean:true",
-        ])
-        .env_clear()
-        .envs(env)
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to enable AT-SPI accessibility on the session bus")?;
-    if !status.success() {
-        bail!("failed to enable AT-SPI accessibility on the session bus");
-    }
-
-    let status = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--dest=org.a11y.Bus",
-            "--type=method_call",
-            "--print-reply",
-            "/org/a11y/bus",
-            "org.freedesktop.DBus.Properties.Set",
-            "string:org.a11y.Status",
-            "string:ScreenReaderEnabled",
-            "variant:boolean:true",
-        ])
-        .env_clear()
-        .envs(env)
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("failed to enable AT-SPI screen reader mode on the session bus")?;
-    if !status.success() {
-        bail!("failed to enable AT-SPI screen reader mode on the session bus");
-    }
-
-    if let Some(registryd) = accessibility_registry_binary() {
+    // Sending to `org.a11y.Bus` activates the bus launcher, which starts a
+    // registry of its own. Starting a second one unconditionally produced two
+    // registries competing for the same well-known name, and whichever lost was
+    // the one the browser had registered with -- after which every call came back
+    // empty. A registry is therefore only started when the bus did not provide
+    // one, which is the case on a bus without activation configured.
+    if !accessibility_registry_is_running()
+        && let Some(registryd) = accessibility_registry_binary()
+    {
         let pid = spawn_logged(
             &registryd,
             &["--use-gnome-session"],
@@ -426,7 +393,233 @@ pub fn repair_accessibility_stack() -> Result<()> {
     if !env.contains_key("DISPLAY") || !env.contains_key("DBUS_SESSION_BUS_ADDRESS") {
         bail!("cannot repair AT-SPI stack without DISPLAY and DBUS_SESSION_BUS_ADDRESS");
     }
-    warm_accessibility_bus(&env, &dir)
+
+    // A bus that already answers must be left completely alone. Sending to
+    // `org.a11y.Bus` activates the bus launcher when the name is unowned, and a
+    // launcher started while a registry is already running produces a second
+    // registry that takes the name over -- leaving the browser registered with
+    // the first one and every later call unanswered.
+    if accessibility_stack_is_up(&env) {
+        return Ok(());
+    }
+
+    // Repair must never tear the accessibility bus down. This runs when a
+    // connection attempt failed, which is usually while a browser is already
+    // running and holding its own connection to that bus: killing the bus and the
+    // registry under it leaves the browser unregistered, and Chrome does not
+    // re-register on its own. The tree then stays empty for the life of that
+    // browser, so every later command fails with "no accessible application".
+    //
+    // Re-asserting the accessibility flags and starting the registry only when it
+    // is genuinely absent fixes the usual cause without that side effect.
+    enable_accessibility_flags(&env)?;
+    if !accessibility_registry_is_running()
+        && let Some(registryd) = accessibility_registry_binary()
+    {
+        let pid = spawn_logged(
+            &registryd,
+            &["--use-gnome-session"],
+            &dir.join("atspi-bus.log"),
+            Some(&env),
+        )?;
+        write_pid_file(&dir.join("atspi-bus.pid"), pid)?;
+    }
+
+    wait_for_accessibility_bus_within(&env, REPAIR_WAIT_TIMEOUT)
+}
+
+/// Wait for the accessibility bus, giving up after `timeout`.
+fn wait_for_accessibility_bus_within(
+    env: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if accessibility_bus_is_usable(env) {
+            return Ok(());
+        }
+        thread::sleep(WAIT_POLL);
+    }
+    bail!("timed out waiting for the AT-SPI accessibility bus to become usable")
+}
+
+/// Make sure the accessibility stack is ready for a browser to register with.
+///
+/// A browser only exposes its tree if it can reach the accessibility bus at the
+/// moment it starts, and it never tries again. When the registry happens to be
+/// down -- it is started lazily by the session bus, and an earlier session may
+/// have left the environment pointing at a dead one -- the browser comes up
+/// unregistered and every later page command fails with an empty tree while the
+/// window is plainly on screen.
+///
+/// This is deliberately non-destructive and safe to call before every launch:
+/// it re-asserts the accessibility flags and starts the registry only when it is
+/// missing. It never stops anything, so a browser that is already running keeps
+/// its registration.
+pub fn ensure_accessibility_stack() -> Result<()> {
+    let dir = session_dir()?;
+    let mut env = BTreeMap::new();
+    for key in [
+        "DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DBUS_SESSION_BUS_PID",
+        "XDG_SESSION_TYPE",
+        "NO_AT_BRIDGE",
+        "GTK_MODULES",
+        "QT_LINUX_ACCESSIBILITY_ALWAYS_ON",
+        "ACCESSIBILITY_ENABLED",
+        "GNOME_ACCESSIBILITY",
+        "HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    if !env.contains_key("DISPLAY") || !env.contains_key("DBUS_SESSION_BUS_ADDRESS") {
+        return Ok(());
+    }
+
+    // If the bus already answers, do nothing at all. This guard is what keeps the
+    // stack from being duplicated: `dbus-send --dest=org.a11y.Bus` *activates* the
+    // bus launcher when that name is not currently owned, and a launcher started
+    // alongside a registry that is already running produces a second registry
+    // that takes over the well-known name. The tool then talks to the new
+    // registry while the browser stays registered with the old one, so the tree
+    // comes back empty or the call blocks -- for every command afterwards.
+    if accessibility_stack_is_up(&env) {
+        // A duplicate left behind by an earlier session splits the browser and the
+        // tool across two registries, so it is collapsed even though the stack
+        // otherwise looks healthy.
+        collapse_duplicate_registries();
+        return Ok(());
+    }
+
+    enable_accessibility_flags(&env)?;
+    if !accessibility_registry_is_running()
+        && let Some(registryd) = accessibility_registry_binary()
+    {
+        let pid = spawn_logged(
+            &registryd,
+            &["--use-gnome-session"],
+            &dir.join("atspi-bus.log"),
+            Some(&env),
+        )?;
+        write_pid_file(&dir.join("atspi-bus.pid"), pid)?;
+        wait_for_accessibility_bus_within(&env, REPAIR_WAIT_TIMEOUT)?;
+    }
+
+    Ok(())
+}
+
+/// How long to wait for the accessibility bus before giving up.
+///
+/// A session being created can take a moment to come up, so the initial wait is
+/// generous. A repair is different: it runs because a connection already failed,
+/// and waiting the full session timeout there turns every failing command into a
+/// ten-second stall that ends in the same error. The shorter bound lets the
+/// command report the real problem promptly.
+const REPAIR_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether an accessibility registry daemon is currently running.
+fn accessibility_registry_is_running() -> bool {
+    Command::new("pgrep")
+        .args(["-af", "at-spi2-registryd"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the accessibility stack is already up and must be left alone.
+///
+/// Both halves matter. The registry process must be running, and its socket must
+/// exist, because a registry whose socket was removed is not usable.
+///
+/// The registry is checked before anything is sent to `org.a11y.Bus`, because
+/// that message is itself what starts a second bus launcher when the name happens
+/// to be unowned. A launcher started alongside a live registry produces a second
+/// registry that takes the well-known name over, leaving the browser registered
+/// with the first one -- and every later call unanswered or blocked.
+fn accessibility_stack_is_up(env: &BTreeMap<String, String>) -> bool {
+    if !accessibility_registry_is_running() {
+        return false;
+    }
+
+    let socket = env
+        .get("XDG_RUNTIME_DIR")
+        .map(|dir| PathBuf::from(dir).join("at-spi/bus"))
+        .unwrap_or_else(|| PathBuf::from(ATSPI_SOCKET_PATH));
+    socket.exists()
+}
+
+/// Make sure exactly one accessibility registry is serving the session bus.
+///
+/// Extra registries are worse than none: each one claims the same well-known
+/// name, so a browser registers with whichever answered first while the tool may
+/// reach another, and the tree then comes back empty or the call blocks. Only the
+/// registry the browser is actually talking to is kept, which is the oldest one
+/// still running, and any later duplicate is stopped.
+fn collapse_duplicate_registries() {
+    let Ok(output) = Command::new("pgrep")
+        .args(["-af", "at-spi2-registryd"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let mut pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
+        .collect();
+    if pids.len() < 2 {
+        return;
+    }
+
+    // Keep the lowest pid: the first registry started is the one a browser that
+    // launched earlier would have registered with.
+    pids.sort_unstable();
+    for pid in pids.into_iter().skip(1) {
+        let _ = terminate_pid(pid);
+    }
+}
+
+/// Turn the accessibility flags on for the current session bus.
+///
+/// These are what make a newly started browser expose its tree at all, and they
+/// are safe to repeat: the call is idempotent and does not disturb anything
+/// already connected.
+fn enable_accessibility_flags(env: &BTreeMap<String, String>) -> Result<()> {
+    for (name, description) in [
+        ("IsEnabled", "AT-SPI accessibility"),
+        ("ScreenReaderEnabled", "AT-SPI screen reader mode"),
+    ] {
+        let status = Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.a11y.Bus",
+                "--type=method_call",
+                "--print-reply",
+                "/org/a11y/bus",
+                "org.freedesktop.DBus.Properties.Set",
+                "string:org.a11y.Status",
+                &format!("string:{name}"),
+                "variant:boolean:true",
+            ])
+            .env_clear()
+            .envs(env)
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("failed to enable {description} on the session bus"))?;
+        if !status.success() {
+            bail!("failed to enable {description} on the session bus");
+        }
+    }
+    Ok(())
 }
 
 fn accessibility_bus_is_usable(env: &BTreeMap<String, String>) -> bool {
@@ -436,15 +629,9 @@ fn accessibility_bus_is_usable(env: &BTreeMap<String, String>) -> bool {
     false
 }
 
+/// Wait for the accessibility bus during session creation.
 fn wait_for_accessibility_bus(env: &BTreeMap<String, String>) -> Result<()> {
-    let start = Instant::now();
-    while start.elapsed() < WAIT_TIMEOUT {
-        if accessibility_bus_is_usable(env) {
-            return Ok(());
-        }
-        thread::sleep(WAIT_POLL);
-    }
-    bail!("timed out waiting for the AT-SPI accessibility bus to become usable")
+    wait_for_accessibility_bus_within(env, WAIT_TIMEOUT)
 }
 
 fn query_accessibility_bus_address(env: &BTreeMap<String, String>) -> Result<Option<String>> {

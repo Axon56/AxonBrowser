@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Two Combobox Demo</title>
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 20px; }
+  .combo { border: 1px solid #999; padding: 8px; width: 260px; cursor: pointer; }
+  ul { border: 1px solid #ccc; width: 260px; max-height: 160px; overflow: auto; margin: 0; padding: 0; }
+  ul[hidden] { display: none; }
+  li { padding: 6px 8px; cursor: pointer; list-style: none; }
+</style>
+</head>
+<body>
+<h1>Two Combobox Demo</h1>
+
+<p>Departure airport</p>
+<div class="combo" id="origin" role="combobox" aria-expanded="false" tabindex="0"
+     aria-label="Departure airport">Select airport</div>
+<ul id="origin-list" role="listbox" hidden>
+  <li role="option">Lagos LOS</li>
+  <li role="option">Abuja ABV</li>
+</ul>
+
+<p>Arrival airport</p>
+<div class="combo" id="destination" role="combobox" aria-expanded="false" tabindex="0"
+     aria-label="Arrival airport">Select airport</div>
+<ul id="destination-list" role="listbox" hidden>
+  <li role="option">Lagos LOS</li>
+  <li role="option">Abuja ABV</li>
+</ul>
+
+<p id="status">Nothing selected.</p>
+
+<script>
+  [['origin', 'origin-list'], ['destination', 'destination-list']].forEach(function (pair) {
+    var combo = document.getElementById(pair[0]);
+    var list = document.getElementById(pair[1]);
+    combo.addEventListener('click', function () {
+      list.hidden = !list.hidden;
+      combo.setAttribute('aria-expanded', String(!list.hidden));
+    });
+    Array.prototype.forEach.call(list.children, function (li) {
+      li.addEventListener('click', function () {
+        combo.textContent = li.textContent;
+        document.getElementById('status').textContent = pair[0] + ': ' + li.textContent;
+        list.hidden = true;
+        combo.setAttribute('aria-expanded', 'false');
+      });
+    });
+  });
+</script>
+</body>
+</html>

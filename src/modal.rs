@@ -23,17 +23,21 @@ pub async fn blocking_dialog() -> Option<BlockingDialog> {
     inspect::blocking_dialog(&root).await
 }
 
-/// Dismiss a modal that is hiding the page, returning its label when handled.
+/// Dismiss a modal that is covering the page.
 ///
-/// The dialog's own close control is preferred because it stays reachable while
-/// the page behind it does not; Escape is the fallback for dialogs that honour
-/// it.
+/// The dialog's own close control is used because it stays reachable while the
+/// page behind it does not; Escape is the fallback for dialogs that honour it.
+/// Success is reported only once the page confirms the cover is gone: an
+/// injected click or key that did nothing must not be reported as a dismissal,
+/// because the caller then acts on a page that is still blocked.
 pub async fn dismiss(dialog: &BlockingDialog) -> bool {
     if let Some(control) = &dialog.dismiss_control
         && inspect::invoke_action(control).await
     {
         window::settle_after_input().await;
-        return true;
+        if crate::dom::covering_overlay().await.is_none() {
+            return true;
+        }
     }
 
     let browser_window = match dom::current_flavor() {
@@ -43,7 +47,7 @@ pub async fn dismiss(dialog: &BlockingDialog) -> bool {
     if let Some(browser_window) = browser_window {
         let _ = window::send_key(&browser_window.id, "Escape");
         window::settle_after_input().await;
-        return true;
+        return crate::dom::covering_overlay().await.is_none();
     }
 
     false

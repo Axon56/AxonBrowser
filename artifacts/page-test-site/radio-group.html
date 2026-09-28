@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Radio Group Demo</title></head>
+<body style="font-family: sans-serif; padding: 20px;">
+<h1>Radio Group Demo</h1>
+
+<!-- Mirrors the Air Peace trip-type control: a bare input paired with a label
+     via `for`, styled by a framework class on both elements. -->
+<div>
+  <input type="radio" name="trip_type" value="ONE_WAY" id="one-way" checked>
+  <label for="one-way">One Way</label>
+</div>
+<div>
+  <input type="radio" name="trip_type" value="ROUND_TRIP" id="round-trip">
+  <label for="round-trip">Round Trip</label>
+</div>
+
+<p id="status">Nothing clicked yet.</p>
+
+<script>
+  Array.prototype.forEach.call(document.querySelectorAll('input[name=trip_type]'), function (input) {
+    input.addEventListener('change', function () {
+      document.getElementById('status').textContent = 'Selected: ' + input.value;
+    });
+  });
+</script>
+</body>
+</html>

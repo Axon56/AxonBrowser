@@ -214,9 +214,7 @@ async fn activate_button_via_focus_and_space(target: &PageActionTarget) -> Resul
 async fn invoke_default_action(node: &crate::model::LiveNode) -> Result<bool> {
     use atspi::proxy::{accessible::ObjectRefExt, proxy_ext::ProxyExt};
 
-    let connection = atspi::AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())

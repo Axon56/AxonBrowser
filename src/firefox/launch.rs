@@ -97,6 +97,11 @@ pub async fn launch_and_wait_with_flavor(
     timeout_ms: u64,
     poll_ms: u64,
 ) -> Result<FirefoxLaunchState> {
+    // The browser only registers with the accessibility bus at startup, so the
+    // stack has to be ready before it is spawned. Otherwise the window appears
+    // but the tree stays empty for the life of that browser, and every page
+    // command fails while the window is plainly on screen.
+    crate::runtime::ensure_accessibility_stack()?;
     let url = normalize_launch_url(initial_url.unwrap_or("about:blank"))?;
     let profile_dir = prepare_profile_dir(flavor, profile_override)?;
     let browser_binary = find_browser_binary(flavor)?;

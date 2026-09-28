@@ -26,7 +26,10 @@ pub async fn select_option(
     option: &str,
     nth: Option<usize>,
 ) -> Result<String> {
-    let target = PageActionTarget::resolve(scope, raw_selectors).await?;
+    // `--nth` addresses the control, not the option: the common need is the
+    // second combo box on a form, and a custom dropdown's control selector is
+    // what matches several of them.
+    let target = PageActionTarget::resolve_nth(scope, raw_selectors, nth).await?;
     let mut notes = Vec::new();
     if target.scroll_into_view().await? {
         notes.push("scrolled into view first".to_string());
@@ -61,7 +64,7 @@ pub async fn select_option(
     // The keyboard attempt above can leave the list toggled shut, so if the
     // options are not there, open the control again and look a second time
     // before giving up.
-    let option_node = match resolve_option(scope, option, nth).await {
+    let option_node = match resolve_option(scope, option).await {
         Ok(node) => node,
         Err(first_err) => {
             let reopened = click_target_node_with_root(
@@ -74,9 +77,7 @@ pub async fn select_option(
             match reopened {
                 Ok(summary) => {
                     open_summary = summary;
-                    resolve_option(scope, option, nth)
-                        .await
-                        .map_err(|_| first_err)?
+                    resolve_option(scope, option).await.map_err(|_| first_err)?
                 }
                 Err(_) => return Err(first_err),
             }
@@ -90,8 +91,11 @@ pub async fn select_option(
 
     // Re-resolve the control before verifying: a native select can expose a
     // stale placeholder through AT-SPI while its value has already changed, so
-    // reading the pre-action node would report a false failure.
-    let verified = match PageActionTarget::resolve(scope, raw_selectors).await {
+    // reading the pre-action node would report a false failure. `--nth` is
+    // applied again so the control that was acted on is the one verified; without
+    // it the first combo box on the page was checked instead, and a successful
+    // selection on the second one was reported as unverified.
+    let verified = match PageActionTarget::resolve_nth(scope, raw_selectors, nth).await {
         Ok(fresh) => option_selected(&fresh, option).await,
         Err(_) => false,
     };
@@ -119,7 +123,13 @@ pub async fn select_option(
 /// `List Item`. Matching only one role made `select-option` report "no page
 /// option matched" on dropdowns whose options were list items, so the roles are
 /// tried in turn and the first with a match wins.
-async fn resolve_option(scope: &PageScope, option: &str, nth: Option<usize>) -> Result<LiveNode> {
+///
+/// The first match is always taken. `--nth` selects which *control* to act on,
+/// because the common need is the second combo box on a form; applying it to the
+/// option instead made a control's own options unreachable and, on a dropdown
+/// with one matching choice, failed outright. When a dropdown really does render
+/// the same label twice, the first is the one the user sees at the top.
+async fn resolve_option(scope: &PageScope, option: &str) -> Result<LiveNode> {
     const OPTION_ROLES: &[&str] = &["List Item", "Menu Item", "Option", "Table Cell"];
 
     let mut failures = Vec::new();
@@ -132,17 +142,7 @@ async fn resolve_option(scope: &PageScope, option: &str, nth: Option<usize>) -> 
         .await
         {
             Ok(matches) if !matches.is_empty() => {
-                let index = nth.unwrap_or(0);
-                let total = matches.len();
-                return matches.into_iter().nth(index).ok_or_else(|| {
-                    anyhow!(
-                        "option {:?} matched {} {}(s) but index {} is out of range",
-                        option,
-                        total,
-                        role,
-                        index
-                    )
-                });
+                return Ok(matches.into_iter().next().expect("non-empty result"));
             }
             Ok(_) => failures.push(format!("{role} => no matches")),
             Err(err) => failures.push(format!("{role} => {err}")),
@@ -160,6 +160,28 @@ async fn resolve_option(scope: &PageScope, option: &str, nth: Option<usize>) -> 
 async fn option_selected(target: &PageActionTarget, option: &str) -> bool {
     let option = option.trim().to_ascii_lowercase();
     if option.is_empty() {
+        return true;
+    }
+
+    // A custom dropdown usually reports its current value as the control's own
+    // accessible name once the list closes, so check that before anything else.
+    if target
+        .node
+        .name
+        .as_deref()
+        .map(|name| name.to_ascii_lowercase().contains(&option))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // The page is the source of truth for a control's value. A custom dropdown
+    // keeps its chosen label as plain text, and a native select can report a
+    // stale placeholder over AT-SPI, so both made a real selection look
+    // unverified and left the caller unable to tell success from failure.
+    if let Some(value) = crate::dom::control_value(&target.node).await
+        && value.to_ascii_lowercase().contains(&option)
+    {
         return true;
     }
 

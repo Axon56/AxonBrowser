@@ -1,15 +1,13 @@
 use anyhow::{Context, Result};
 use atspi::{
-    AccessibilityConnection, CoordType, ScrollType,
+    CoordType, ScrollType,
     proxy::{accessible::ObjectRefExt, proxy_ext::ProxyExt},
 };
 
 use crate::model::LiveNode;
 
 pub async fn grab_focus(node: &LiveNode) -> Result<bool> {
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())
@@ -31,9 +29,7 @@ pub async fn grab_focus(node: &LiveNode) -> Result<bool> {
 }
 
 pub async fn scroll_into_view(node: &LiveNode) -> Result<bool> {
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())
@@ -67,19 +63,23 @@ pub async fn scroll_into_view(node: &LiveNode) -> Result<bool> {
     if let Ok(text) = proxies.text().await
         && let Ok(count) = text.character_count().await
         && count > 0
-        && let Ok(scrolled) = text.scroll_substring_to(0, count, 6).await
-        && scrolled
     {
-        return Ok(true);
+        // The last-resort text scroll. Only report success when the call
+        // actually succeeded; an error here used to be swallowed, and the
+        // substring offset is a guess that can be out of range for short text.
+        let offset = u32::try_from(count.saturating_sub(1)).unwrap_or(0);
+        if let Ok(scrolled) = text.scroll_substring_to(0, count, offset).await
+            && scrolled
+        {
+            return Ok(true);
+        }
     }
 
     Ok(false)
 }
 
 pub async fn read_text(node: &LiveNode) -> Result<Option<String>> {
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())
@@ -111,9 +111,7 @@ pub async fn read_text(node: &LiveNode) -> Result<Option<String>> {
 }
 
 pub async fn set_text(node: &LiveNode, text: &str) -> Result<bool> {
-    let connection = AccessibilityConnection::new()
-        .await
-        .context("failed to connect to the AT-SPI accessibility bus")?;
+    let connection = crate::inspect::connect_accessibility().await?;
     let accessible = node
         .object_ref
         .as_accessible_proxy(connection.connection())
