@@ -1,8 +1,8 @@
 ## AxonBrowser v1.1.2
 
-Fixes for the regressions and gaps found driving the Air Peace booking widget
-on a live run, plus the stability work behind them. Every change is in the
-shared action layer, so Chrome, Edge, Firefox, and Camoufox all behave the same.
+Fixes for the regressions and gaps found driving a booking widget on a live
+run, plus the stability work behind them. Every change is in the shared action
+layer, so Chrome, Edge, Firefox, and Camoufox all behave the same.
 
 ### The regression, fixed
 
@@ -52,9 +52,9 @@ shared action layer, so Chrome, Edge, Firefox, and Camoufox all behave the same.
 
 - 16/16 page-command regression on the demo site, twice in a row, where the
   same run previously collapsed the tree partway through.
-- Live Air Peace run: tree stable at 595 lines across six consecutive reads,
-  Round Trip confirmed selected in the page, departure date set to 2026-10-08,
-  no navigation from any form click.
+- Live run on a real booking page: tree stable at 595 lines across six
+  consecutive reads, the trip-type radio confirmed selected in the page, the
+  departure date set, and no navigation from any form click.
 
 ### Install
 

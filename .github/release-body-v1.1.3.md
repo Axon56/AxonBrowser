@@ -1,14 +1,15 @@
 ## AxonBrowser v1.1.3
 
 Fixes for `select-option` on a form with two dropdowns, from a live run against
-the Air Peace booking widget. All four reported problems are addressed, plus the
-scroll-state wobble. Every change is in the shared action layer, so Chrome, Edge,
-Firefox, and Camoufox behave the same.
+a booking flow. All four reported problems are addressed, plus the scroll-state
+wobble. Every change is in the shared action layer, so Chrome, Edge, Firefox, and
+Camoufox behave the same.
 
 ### `select-option` no longer touches the wrong control
 
-This was the worst of the batch: with the "To" dropdown open, selecting Abuja
-applied it to the "From" control and overwrote Lagos.
+This was the worst of the batch: with the destination dropdown open, selecting
+a value applied it to the origin control and overwrote the value already set
+there.
 
 The cause is that a dropdown widget renders its list as a *sibling* of the
 control, so every dropdown's options sit in the accessibility tree at the same
