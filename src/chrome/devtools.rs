@@ -306,7 +306,29 @@ fn http_get_json(port: u16, path: &str) -> Result<String> {
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => response.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                response.extend_from_slice(&chunk[..n]);
+                // Chrome's DevTools endpoint can keep the socket open even when
+                // Connection: close was requested. Stop once the declared HTTP
+                // body is complete, instead of paying the two-second read timeout
+                // on every /json/list call.
+                if let Some(header_end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&response[..header_end]);
+                    let content_length = header.lines().find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        if key.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(length) = content_length
+                        && response.len() >= header_end + 4 + length
+                    {
+                        break;
+                    }
+                }
+            }
             Err(err)
                 if matches!(
                     err.kind(),

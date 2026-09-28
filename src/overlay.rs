@@ -302,6 +302,12 @@ pub async fn guarded_click_point<T: ClickTarget>(
         window::settle_after_input().await;
     }
 
+    // Accessibility scroll-to can park ANY target under a sticky header.
+    // Centre it before the first hit test, not just combo boxes: in particular
+    // readonly date entries must not click through to the navigation menu.
+    let (x, y) = inspect::clickable_point_stable(target.node()).await?;
+    center_target(target, browser_window, x, y).await?;
+
     for attempt in 0..ATTEMPTS {
         let (screen_x, screen_y) = inspect::clickable_point_stable(target.node()).await?;
 

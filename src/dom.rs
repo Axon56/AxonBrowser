@@ -475,11 +475,17 @@ const VALUE_BY_NAME_JS: &str = r#"(function(){
     if (el.value !== undefined && el.value !== null && String(el.value).trim() !== '') {
       parts.push(String(el.value).trim());
     }
+    // A select reports the chosen option, never its whole text: the text of a select
+    // is every option concatenated, so including it would make the control look like
+    // it holds all of its options at once and a selection that never happened would
+    // read as done.
     if (el.selectedIndex >= 0 && el.options && el.options[el.selectedIndex]) {
       parts.push((el.options[el.selectedIndex].textContent || '').trim());
     }
-    var text = (el.textContent || '').trim();
-    if (text) parts.push(text);
+    if (el.tagName !== 'SELECT') {
+      var text = (el.textContent || '').trim();
+      if (text) parts.push(text);
+    }
     if (parts.length) return parts.join(' | ');
   }
   return null;
@@ -581,14 +587,19 @@ const POINT_HIT_JS: &str = r#"(function(){
 
   // A control the user can actually operate stays clickable even inside a fixed
   // container: a modal's own form is the target in that case, not an occluder.
-  // A link only counts when it would navigate -- a dropdown toggle is an `<a>`
-  // with no `href`, and treating it as operable is how a menu sitting over a
-  // form field was accepted as the thing to click.
+  // Only genuine controls count. A container is not operable just because it
+  // carries a role: a full-screen `role=dialog` backdrop is the most common way a
+  // page covers its content, and treating that as operable is how a click was sent
+  // through a modal to the field behind it. A link counts only when it would
+  // navigate, since a dropdown toggle is an `<a>` with no `href`.
+  var OPERABLE_ROLES = ['button', 'link', 'textbox', 'combobox', 'checkbox',
+    'radio', 'switch', 'menuitem', 'option', 'slider', 'spinbutton', 'searchbox', 'tab'];
+  var role = el.getAttribute ? (el.getAttribute('role') || '').toLowerCase() : '';
   var topIsInteractive = el.tagName === 'INPUT' || el.tagName === 'SELECT'
     || el.tagName === 'TEXTAREA' || el.tagName === 'BUTTON'
     || (el.tagName === 'A' && el.getAttribute('href'))
     || el.isContentEditable === true
-    || (el.getAttribute && el.getAttribute('role') && el.getAttribute('role') !== 'presentation');
+    || OPERABLE_ROLES.indexOf(role) >= 0;
   var overlay = pinned && !topIsInteractive;
   return {link: link, overlay: overlay, inside: inside};
 })()"#;
@@ -659,13 +670,25 @@ const CENTER_NAMED_JS: &str = r#"(function(){
 
   var nodes = document.querySelectorAll('input, select, textarea, button, a, [role], [aria-label]');
   var el = null;
+  // The same accessible name often belongs to multiple controls (departure and
+  // return date fields, for example). Choose the matching control nearest the
+  // accessibility target's reported point, not the first document match.
+  var chrome = Math.max(0, window.outerHeight - window.innerHeight);
+  var wantedX = __X__ - window.screenX;
+  var wantedY = __Y__ - window.screenY - chrome;
+  var bestDistance = Infinity;
   if (want) {
     for (var i = 0; i < nodes.length; i++) {
       if (nameOf(nodes[i]).toLowerCase() !== want) continue;
-      // Prefer something the user can see; a hidden duplicate must not be moved.
       if (nodes[i].getClientRects().length === 0) continue;
-      el = nodes[i];
-      break;
+      var rect = nodes[i].getBoundingClientRect();
+      var dx = rect.left + rect.width / 2 - wantedX;
+      var dy = rect.top + rect.height / 2 - wantedY;
+      var distance = dx * dx + dy * dy;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        el = nodes[i];
+      }
     }
   }
 
@@ -786,19 +809,25 @@ const COVERING_OVERLAY_JS: &str = r#"(function(){
   // A full-viewport fixed layer stacked above the page. The height threshold
   // excludes a sticky header, and the stacking requirement excludes the page's
   // own fixed wrappers, which sit at the default stacking level.
-  var all = document.querySelectorAll('body *');
-  for (var j = 0; j < all.length; j++) {
-    var el = all[j];
-    if (el === document.body || el === document.documentElement) continue;
-    if (!visible(el)) continue;
+  // A layer that occupies 70% of the viewport and at least 70% of its height
+  // necessarily covers its centre (assuming its box is inside the viewport).
+  // Inspect only the hit element and its ancestors, rather than querying every
+  // node in the document and forcing layout / hit testing for each one. On large
+  // pages that whole-tree scan can hold Runtime.evaluate long enough to stall clicks.
+  var el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+  while (el && el !== document.body && el !== document.documentElement) {
     var style = window.getComputedStyle(el);
-    if (style.position !== 'fixed' && style.position !== 'absolute') continue;
-    var z = parseFloat(style.zIndex);
-    if (!isFinite(z) || z < 10) continue;
-    var rect = el.getBoundingClientRect();
-    if (rect.width * rect.height < viewport * 0.7) continue;
-    if (rect.height < window.innerHeight * 0.7) continue;
-    return describe(el);
+    if (style.position === 'fixed' || style.position === 'absolute') {
+      var z = parseFloat(style.zIndex);
+      if (isFinite(z) && z >= 10) {
+        var rect = el.getBoundingClientRect();
+        if (rect.width * rect.height >= viewport * 0.7 &&
+            rect.height >= window.innerHeight * 0.7 && visible(el)) {
+          return describe(el);
+        }
+      }
+    }
+    el = el.parentElement;
   }
 
   return null;
@@ -1263,7 +1292,11 @@ const DROPDOWN_STATE_JS: &str = r#"(function(){
       var attr = n.getAttribute && n.getAttribute('aria-expanded');
       if (attr === 'true') { expanded = true; break; }
       if (attr === 'false') { expanded = false; break; }
-      if (n.tagName === 'SELECT') { expanded = n.size > 1; break; }
+      // A native select renders its options inline only once its size is raised. A
+      // plain one opens an operating-system popup that the page cannot see, so its
+      // state is unknown rather than closed: reporting it as closed would refuse a
+      // selection that is perfectly fine.
+      if (n.tagName === 'SELECT') { expanded = n.size > 1 ? true : null; break; }
       var list = n.querySelector ? n.querySelector('.choices__list--dropdown') : null;
       if (list) { expanded = list.classList.contains('is-active'); break; }
       n = n.parentElement;

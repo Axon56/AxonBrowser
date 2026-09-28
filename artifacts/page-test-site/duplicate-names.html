@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Duplicate Names Demo</title>
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 20px; }
+  #spacer { height: 1500px; background: #eee; }
+  label { display: block; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Duplicate Names Demo</h1>
+
+<!-- Two date fields carrying the *same* accessible name, exactly like a real
+     booking form's departure and return inputs. A lookup that takes the first
+     match always moves the departure field, so acting on the return field
+     scrolls the wrong one into view and the click lands on empty space. -->
+<div id="form">
+  <label for="departure-date">Departure date</label>
+  <input id="departure-date" type="text" aria-label="DD MMM YYYY" placeholder="DD MMM YYYY">
+
+  <label for="return-date">Return date</label>
+  <input id="return-date" type="text" aria-label="DD MMM YYYY" placeholder="DD MMM YYYY">
+
+  <p id="status">Nothing clicked yet.</p>
+</div>
+
+<div id="spacer">scroll filler</div>
+
+<script>
+  ['departure-date', 'return-date'].forEach(function (id) {
+    document.getElementById(id).addEventListener('click', function () {
+      document.getElementById('status').textContent = id + ' clicked.';
+    });
+  });
+</script>
+</body>
+</html>

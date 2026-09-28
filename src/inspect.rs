@@ -723,16 +723,21 @@ pub struct BlockingDialog {
 
 /// Find a control inside a dialog that dismisses it.
 async fn dialog_dismiss_control(dialog: &ObjectRefOwned) -> Option<ObjectRefOwned> {
+    // Ordered from least to most committal. A cover is dismissed to reach the page
+    // behind it, so a control that simply closes it is preferred over one that also
+    // makes a choice on the user behalf: accepting a consent prompt is a decision
+    // the caller never asked for.
     const DISMISS_WORDS: &[&str] = &[
         "close",
         "dismiss",
-        "accept",
-        "reject",
-        "cancel",
-        "no thanks",
-        "not now",
         "×",
         "✕",
+        "reject",
+        "decline",
+        "no thanks",
+        "not now",
+        "cancel",
+        "accept",
     ];
 
     let live = LiveNode {

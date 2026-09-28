@@ -700,6 +700,19 @@ mod tests {
     }
 
     #[test]
+    fn a_selects_concatenated_options_are_not_a_value() {
+        // The text of a select is every option joined together, so a control read
+        // that way looks like it holds all of its options at once. That made a
+        // selection which never happened read as done, so the value of a select must
+        // come from its chosen option only.
+        let concatenated = "CatOtter";
+        assert!(option_matches(concatenated, "Otter"), "raw text does match");
+        // Which is exactly why the page read must not offer it: the reader skips the
+        // text of a select, and the chosen option alone is compared.
+        assert!(!option_matches("Cat", "Otter"));
+    }
+
+    #[test]
     fn short_tokens_alone_do_not_match() {
         // Two-character fragments are ignored so unrelated options cannot be
         // considered equal by coincidence.
