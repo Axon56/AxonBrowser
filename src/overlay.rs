@@ -287,6 +287,21 @@ pub async fn guarded_click_point<T: ClickTarget>(
     // so the navigation check is only applied to other kinds of control.
     let target_is_link = target.node().role.trim().eq_ignore_ascii_case("link");
 
+    // Clear anything covering the page before the first coordinate is resolved.
+    // Resolving first and dismissing afterwards leaves the first click aimed at
+    // where the target sits under the overlays, which on a page with a promo and a
+    // cookie banner stacked means the click is sent to a point the overlay owns.
+    // The guard catches that and refuses, but the aim was already wrong, so the
+    // step costs a retry it should never have needed.
+    if crate::dom::covering_overlay().await.is_some() {
+        let _ = window::send_key(&browser_window.id, "Escape");
+        window::settle_after_input().await;
+        if let Some(label) = crate::modal::dismiss_if_present().await {
+            dismissed = Some(label);
+        }
+        window::settle_after_input().await;
+    }
+
     for attempt in 0..ATTEMPTS {
         let (screen_x, screen_y) = inspect::clickable_point_stable(target.node()).await?;
 
@@ -313,6 +328,16 @@ pub async fn guarded_click_point<T: ClickTarget>(
             if let Some(reason) = unreachable {
                 blocked = Some(reason);
                 if attempt + 1 < ATTEMPTS {
+                    // Dismiss first, then reposition. An overlay is removed with
+                    // Escape and a sticky header is not going anywhere, so both
+                    // are needed: without the dismissal the retry finds the same
+                    // cover, and without the reposition it finds the same covered
+                    // point. The coordinate is resolved again at the top of the
+                    // next attempt, after both have been applied.
+                    if hit.overlay && !target_is_link {
+                        let _ = window::send_key(&browser_window.id, "Escape");
+                        window::settle_after_input().await;
+                    }
                     center_target(target, browser_window, screen_x, screen_y).await?;
                 }
                 continue;
@@ -393,7 +418,16 @@ async fn center_target<T: ClickTarget>(
     // is exactly what the occluder has taken over, so asking the page about it
     // returns the header and finds nothing to scroll.
     let name = target.node().name.as_deref().unwrap_or_default().trim();
-    if crate::dom::bring_into_view(crate::dom::current_flavor(), name, screen_x, screen_y).await {
+    let flavor = crate::dom::current_flavor();
+    if crate::dom::bring_into_view(flavor, name, screen_x, screen_y).await {
+        window::settle_after_input().await;
+        return Ok(());
+    }
+
+    // The point-based correction is tried next, because it works when the target
+    // has no accessible name -- and on a real booking form the airport combos are
+    // unnamed, so the name lookup above finds nothing for them.
+    if crate::dom::center_at_point(flavor, screen_x, screen_y).await {
         window::settle_after_input().await;
         return Ok(());
     }

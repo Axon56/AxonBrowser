@@ -10,6 +10,9 @@ pub async fn click(
     raw_selectors: &[String],
     nth: Option<usize>,
 ) -> Result<String> {
+    // A click is not retried on a transient bus failure here: the action may have
+    // already reached the page, and repeating it could toggle a control twice.
+    // The lookup itself is what gets retried, inside `resolve_nth`.
     let target = PageActionTarget::resolve_nth(scope, raw_selectors, nth).await?;
     let mut notes = Vec::new();
 

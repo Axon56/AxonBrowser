@@ -330,6 +330,67 @@ pub async fn control_value(node: &crate::model::LiveNode) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Read what the control at a screen point currently holds.
+///
+/// A control with no accessible name cannot be found by name, and on a real
+/// booking form both airport combos are exactly that: an unnamed `Combo Box`
+/// whose label lives in a sibling element. The point the caller already resolved
+/// identifies the right one, so the element under it is read instead. Its own
+/// text, its `value`, and the selected option's label are all returned, because a
+/// native select and a custom dropdown each expose the answer differently.
+///
+/// Returns `None` when the page cannot be queried, so an unreachable page is not
+/// read as "the control is empty".
+pub async fn value_at_point(flavor: Flavor, screen_x: i32, screen_y: i32) -> Option<String> {
+    let expression = VALUE_AT_POINT_JS
+        .replace("__X__", &screen_x.to_string())
+        .replace("__Y__", &screen_y.to_string());
+    let value = evaluate(flavor, &expression).await?;
+    let value = value.as_str()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+/// Report what the control under a point currently shows.
+///
+/// The point is converted from screen to viewport coordinates first, because the
+/// page area starts below the browser chrome. The element under the point is read
+/// directly, and when it is a wrapper its own text is used, which is where a
+/// custom dropdown keeps the chosen label.
+const VALUE_AT_POINT_JS: &str = r#"(function(){
+  var chrome = Math.max(0, window.outerHeight - window.innerHeight);
+  var x = __X__ - window.screenX;
+  var y = __Y__ - window.screenY - chrome;
+  var el = document.elementFromPoint(x, y);
+  if (!el) return null;
+
+  var parts = [];
+  var n = el;
+  for (var i = 0; i < 4 && n; i++) {
+    if (n.nodeType !== 1) { n = n.parentElement; continue; }
+    if (n.value !== undefined && n.value !== null && String(n.value).trim() !== '') {
+      parts.push(String(n.value).trim());
+    }
+    if (n.selectedIndex >= 0 && n.options && n.options[n.selectedIndex]) {
+      parts.push((n.options[n.selectedIndex].textContent || '').trim());
+    }
+    // The element's own text, but only when it holds no further controls. A wrapper
+    // around a closed dropdown would otherwise contribute the labels of options that
+    // are not on screen, and a check that reads them reports a selection that never
+    // happened.
+    var nested = n.querySelector && n.querySelector('[role=option], li, select, input, textarea, [role=listbox]');
+    if (!nested) {
+      var text = (n.textContent || '').trim();
+      if (text && text.length < 200) parts.push(text);
+    }
+    if (parts.length) break;
+    n = n.parentElement;
+  }
+  return parts.length ? parts.join(' | ') : null;
+})()"#;
+
 /// Report everything a control exposes about its current choice.
 ///
 /// A native select answers with `value` and the selected option's label, while a
@@ -651,10 +712,22 @@ const COVERING_OVERLAY_JS: &str = r#"(function(){
   var viewport = window.innerWidth * window.innerHeight;
 
   function visible(el) {
-    if (!el || el.getClientRects().length === 0) return false;
+    if (!el) return false;
+    var rect = el.getBoundingClientRect();
+    // A usable element has a real box. The height floor matters: a closed dropdown
+    // is often kept in the markup with its height collapsed to a sliver, and that
+    // sliver still receives hits, so a plain box test calls it visible.
+    if (rect.width < 2 || rect.height < 8) return false;
     var style = window.getComputedStyle(el);
     if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
-    return parseFloat(style.opacity || '1') > 0.01;
+    if (parseFloat(style.opacity || '1') <= 0.01) return false;
+    // The point must actually belong to this element. A hit that merely *contains*
+    // it means an ancestor is covering or clipping it, which is exactly the case for
+    // an option inside a collapsed list: the option keeps its own box, the list clips
+    // it, and a check that accepted an ancestor hit would report it as visible and
+    // then click a point where nothing is drawn.
+    var hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
   }
 
   function describe(el) {
@@ -759,4 +832,408 @@ const DISABLED_BY_NAME_JS: &str = r#"(function(){
   }
   if (matches === 0) return 'enabled';
   return disabled === matches ? 'disabled' : 'enabled';
+})()"#;
+
+/// Move the viewport so a screen point sits in the middle of it.
+///
+/// Used when the target has no accessible name, which is the common case on a real
+/// booking form: both airport combos are unnamed, so the name-based lookup finds
+/// nothing for them. The point is the only handle available, and it is corrected in
+/// the page's own coordinates with instant scrolling, because a page with
+/// `scroll-behavior: smooth` animates the move and a position read straight
+/// afterwards still describes the old place.
+///
+/// Returns false when the page cannot be reached or nothing moved, so the caller
+/// knows the nudge did not happen.
+pub async fn center_at_point(flavor: Flavor, screen_x: i32, screen_y: i32) -> bool {
+    let expression = CENTER_AT_POINT_JS
+        .replace("__X__", &screen_x.to_string())
+        .replace("__Y__", &screen_y.to_string());
+    evaluate(flavor, &expression)
+        .await
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// Move a point's viewport position to the middle of the viewport.
+///
+/// The window is scrolled, and the nearest scrollable ancestor of the element under
+/// the point as well, because a form inside a scrolling panel ignores a window
+/// scroll. Both are applied instantly so the position is settled immediately.
+const CENTER_AT_POINT_JS: &str = r#"(function(){
+  var chrome = Math.max(0, window.outerHeight - window.innerHeight);
+  var x = __X__ - window.screenX;
+  var y = __Y__ - window.screenY - chrome;
+  var delta = y - (window.innerHeight / 2);
+  if (Math.abs(delta) < 8) return false;
+
+  var moved = false;
+  var node = document.elementFromPoint(x, y);
+  while (node && node !== document.body && node !== document.documentElement) {
+    var style = window.getComputedStyle(node);
+    var overflow = style.overflowY;
+    if ((overflow === 'auto' || overflow === 'scroll')
+        && node.scrollHeight > node.clientHeight + 1) {
+      var before = node.scrollTop;
+      node.scrollTop += delta;
+      if (node.scrollTop !== before) moved = true;
+      break;
+    }
+    node = node.parentElement;
+  }
+
+  var windowBefore = window.scrollY;
+  window.scrollTo({top: windowBefore + delta, left: window.scrollX, behavior: 'instant'});
+  if (window.scrollY !== windowBefore) moved = true;
+
+  return moved;
+})()"#;
+
+/// An option that is currently on screen, with the point that selects it.
+#[derive(Debug, Clone)]
+pub struct OpenOption {
+    pub text: String,
+    /// Screen coordinates of the option's centre.
+    pub screen_x: i32,
+    pub screen_y: i32,
+}
+
+/// The dropdown that is currently open, and what it is offering.
+#[derive(Debug, Clone)]
+pub struct OpenDropdown {
+    /// Best-effort name of the control the list belongs to, so a caller can tell
+    /// which dropdown this is. `None` when the control carries no label at all.
+    pub control: Option<String>,
+    /// Screen rectangle of the open list itself: x, y, width, height.
+    ///
+    /// A caller uses it to decide which of several identically named options in the
+    /// accessibility tree actually belongs to this list, which is what stops a
+    /// selection from being applied to a different control.
+    pub list_rect: (i32, i32, i32, i32),
+    /// Screen coordinates of the control that owns the list.
+    ///
+    /// The point is what makes verification possible for an unnamed control: the
+    /// chosen value is read from the control itself once the list closes, and on a
+    /// real booking form both airport combos have no accessible name to look up.
+    pub control_point: Option<(i32, i32)>,
+    pub options: Vec<OpenOption>,
+}
+
+/// Describe the dropdown that is open on the page, if one is.
+///
+/// This is what makes `select-option` act on the *right* control. Two dropdowns on
+/// one form routinely offer the same labels -- an airline's origin and destination
+/// both list Lagos and Abuja -- so resolving the option by label alone picks
+/// whichever comes first on the page, and a value meant for the second control is
+/// applied to the first and overwrites it. The list that is open is the one the
+/// caller opened, and it is also the one that will be affected by the click, so it
+/// is the only list worth looking in.
+///
+/// Each option is reported with the screen point that selects it, because the
+/// accessibility tree does not reliably nest a dropdown's options under its
+/// control and often exposes identical labels for two different lists.
+///
+/// Returns `None` when no list is open, or when the page cannot be queried.
+pub async fn open_dropdown() -> Option<OpenDropdown> {
+    let value = evaluate(current_flavor(), OPEN_DROPDOWN_JS).await?;
+    if value.is_null() {
+        return None;
+    }
+
+    let control = value
+        .get("control")
+        .and_then(|name| name.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+
+    let options = value
+        .get("options")
+        .and_then(|options| options.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    Some(OpenOption {
+                        text: option.get("text")?.as_str()?.trim().to_string(),
+                        screen_x: i32::try_from(option.get("x")?.as_i64()?).ok()?,
+                        screen_y: i32::try_from(option.get("y")?.as_i64()?).ok()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let control_point = value
+        .get("controlX")
+        .and_then(|x| x.as_i64())
+        .zip(value.get("controlY").and_then(|y| y.as_i64()))
+        .and_then(|(x, y)| Some((i32::try_from(x).ok()?, i32::try_from(y).ok()?)));
+
+    let list_rect = value
+        .get("listX")
+        .and_then(|x| x.as_i64())
+        .zip(value.get("listY").and_then(|y| y.as_i64()))
+        .zip(value.get("listW").and_then(|w| w.as_i64()))
+        .zip(value.get("listH").and_then(|h| h.as_i64()))
+        .and_then(|(((x, y), w), h)| {
+            Some((
+                i32::try_from(x).ok()?,
+                i32::try_from(y).ok()?,
+                i32::try_from(w).ok()?,
+                i32::try_from(h).ok()?,
+            ))
+        })
+        .unwrap_or((0, 0, 0, 0));
+
+    Some(OpenDropdown {
+        control,
+        control_point,
+        list_rect,
+        options,
+    })
+}
+
+/// Locate the open dropdown and report its options in screen coordinates.
+///
+/// A list is recognised by its role or by the marker class the common widget
+/// libraries use, and only a visible one counts: a page keeps every closed
+/// dropdown in the markup, so an unshown list would otherwise look open. The
+/// control's own label is taken from its aria-label or its wrapping label, which
+/// is how a caller matches the list to the control it resolved.
+const OPEN_DROPDOWN_JS: &str = r#"(function(){
+  var chrome = Math.max(0, window.outerHeight - window.innerHeight);
+  var sx = window.screenX, sy = window.screenY + chrome;
+
+  function visible(el) {
+    if (!el) return false;
+    var rect = el.getBoundingClientRect();
+    // A usable element has a real box. The height floor matters: a closed dropdown
+    // is often kept in the markup with its height collapsed to a sliver, and that
+    // sliver still receives hits, so a plain box test calls it visible.
+    if (rect.width < 2 || rect.height < 8) return false;
+    var style = window.getComputedStyle(el);
+    if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+    if (parseFloat(style.opacity || '1') <= 0.01) return false;
+    // The point must actually belong to this element. A hit that merely *contains*
+    // it means an ancestor is covering or clipping it, which is exactly the case for
+    // an option inside a collapsed list: the option keeps its own box, the list clips
+    // it, and a check that accepted an ancestor hit would report it as visible and
+    // then click a point where nothing is drawn.
+    var hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
+  }
+
+  // A native select shows its options inline once its size is raised.
+  var selects = document.querySelectorAll('select');
+  for (var s = 0; s < selects.length; s++) {
+    var select = selects[s];
+    if (!visible(select) || select.size <= 1) continue;
+    var rect = select.getBoundingClientRect();
+    return {
+      control: select.getAttribute('aria-label') || '',
+      controlX: Math.round(rect.left + rect.width / 2 + sx),
+      controlY: Math.round(rect.top + rect.height / 2 + sy),
+      listX: Math.round(rect.left + sx),
+      listY: Math.round(rect.top + sy),
+      listW: Math.round(rect.width),
+      listH: Math.round(rect.height),
+      options: Array.prototype.map.call(select.options, function (opt, index) {
+        var height = rect.height / Math.max(1, select.options.length);
+        return {
+          text: (opt.textContent || '').trim(),
+          x: Math.round(rect.left + rect.width / 2 + sx),
+          y: Math.round(rect.top + height * (index + 0.5) + sy)
+        };
+      })
+    };
+  }
+
+  var candidates = document.querySelectorAll(
+    '[role=listbox], [role=menu], .choices__list--dropdown, .flatpickr-calendar.open, .select2-results__options');
+  for (var i = 0; i < candidates.length; i++) {
+    var list = candidates[i];
+    if (!visible(list)) continue;
+    if (list.classList && list.classList.contains('choices__list--dropdown')
+        && !list.classList.contains('is-active')) continue;
+
+    var items = list.querySelectorAll('[role=option], [role=menuitem], li, .choices__item--selectable');
+    var options = [];
+    for (var j = 0; j < items.length; j++) {
+      var item = items[j];
+      if (!visible(item)) continue;
+      var label = (item.getAttribute('aria-label') || item.textContent || '').trim();
+      if (!label) continue;
+      var r = item.getBoundingClientRect();
+      options.push({
+        text: label,
+        x: Math.round(r.left + r.width / 2 + sx),
+        y: Math.round(r.top + r.height / 2 + sy)
+      });
+    }
+    if (!options.length) continue;
+
+    // The control that owns the list: the nearest labelled ancestor, or the
+    // element the list points at with aria-owns/aria-controls.
+    var control = '';
+    var owner = list.parentElement;
+    for (var k = 0; k < 6 && owner; k++) {
+      if (owner.getAttribute && owner.getAttribute('aria-label')) {
+        control = owner.getAttribute('aria-label');
+        break;
+      }
+      if (owner.classList && owner.classList.contains('choices')) {
+        var inner = owner.querySelector('.choices__inner');
+        if (inner) {
+          var labelled = inner.querySelector('[aria-label]');
+          control = labelled ? labelled.getAttribute('aria-label') : '';
+          if (!control) {
+            var field = owner.querySelector('select, input');
+            if (field) {
+              if (field.id) {
+                var forLabel = document.querySelector('label[for="' + field.id + '"]');
+                if (forLabel) control = (forLabel.textContent || '').trim();
+              }
+              if (!control && field.getAttribute('aria-label')) {
+                control = field.getAttribute('aria-label');
+              }
+            }
+          }
+        }
+        break;
+      }
+      owner = owner.parentElement;
+    }
+
+    // The control's own point, so a caller can read the chosen value back from the
+    // control after the list closes even when it has no accessible name.
+    var controlX = null, controlY = null;
+    var anchor = list;
+    // Walk up until an element actually holds the list, then use the list's own top
+    // edge when nothing above it is a usable anchor. The point only has to identify
+    // the control for a caller reading the value back, and the list's top edge is
+    // where the control sits -- the body, which is what a sibling list resolves to,
+    // is nowhere near it and would make the check reject the right list.
+    for (var w = 0; w < 4 && anchor; w++) {
+      var ar = anchor.getBoundingClientRect();
+      if (ar.width > 0 && ar.height > 0 && anchor !== document.body) {
+        controlX = Math.round(ar.left + ar.width / 2 + sx);
+        controlY = Math.round(ar.top + sy);
+        break;
+      }
+      anchor = anchor.parentElement;
+    }
+    if (controlX === null) {
+      var lr = list.getBoundingClientRect();
+      if (lr.width > 0) {
+        controlX = Math.round(lr.left + lr.width / 2 + sx);
+        controlY = Math.round(lr.top + sy);
+      }
+    }
+
+    var listRect = list.getBoundingClientRect();
+    return {
+      control: control,
+      controlX: controlX,
+      controlY: controlY,
+      listX: Math.round(listRect.left + sx),
+      listY: Math.round(listRect.top + sy),
+      listW: Math.round(listRect.width),
+      listH: Math.round(listRect.height),
+      options: options
+    };
+  }
+
+  return null;
+})()"#;
+
+/// Everything needed to decide whether a control's list is open, in one query.
+///
+/// Each page query is a separate round trip over the browser's debug transport, so
+/// asking several questions one at a time makes a step that should take a moment
+/// take tens of seconds. Everything a caller needs to judge a dropdown is returned
+/// from a single evaluation instead.
+#[derive(Debug, Clone, Default)]
+pub struct DropdownState {
+    /// Signature of the visible option labels, for change detection.
+    pub options: String,
+    /// Whether the control at the point reports its list as open, when a point was
+    /// supplied and the control exposes the state at all.
+    pub expanded: Option<bool>,
+}
+
+/// Probe a control's dropdown state in one page query.
+///
+/// Returns `None` when the page cannot be queried, which callers must treat as
+/// unknown rather than as "closed".
+pub async fn dropdown_state(flavor: Flavor, point: Option<(i32, i32)>) -> Option<DropdownState> {
+    let (x, y) = point.unwrap_or((-1, -1));
+    let expression = DROPDOWN_STATE_JS
+        .replace("__X__", &x.to_string())
+        .replace("__Y__", &y.to_string());
+    let value = evaluate(flavor, &expression).await?;
+
+    Some(DropdownState {
+        options: value
+            .get("options")
+            .and_then(|options| options.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        expanded: value
+            .get("expanded")
+            .and_then(|expanded| expanded.as_bool()),
+    })
+}
+
+/// Report the visible option labels and, when a point is given, whether the control
+/// there has its list open.
+///
+/// A point of -1 means the caller has none, and the expanded state is reported as
+/// null rather than guessed. The expanded test walks up a few ancestors because the
+/// point usually lands on an inner element of the control, and covers the three ways
+/// a widget exposes the state: an aria-expanded attribute, an inline native select,
+/// and the marker class the common widget libraries use.
+const DROPDOWN_STATE_JS: &str = r#"(function(){
+  function shown(el) {
+    if (!el) return false;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 4) return false;
+    var style = window.getComputedStyle(el);
+    if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+    if (parseFloat(style.opacity || '1') <= 0.01) return false;
+    // Only an element the point actually belongs to is on screen. A collapsed
+    // dropdown clips its options, and a hit that merely contains the option means it
+    // is hidden, so accepting that would list options the user cannot see.
+    var hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return !!hit && (hit === el || el.contains(hit));
+  }
+
+  var parts = [];
+  var nodes = document.querySelectorAll(
+    '[role=option], [role=menuitem], option, .choices__item--selectable');
+  for (var i = 0; i < nodes.length; i++) {
+    var el = nodes[i];
+    if (!shown(el)) continue;
+    var label = (el.getAttribute('aria-label') || el.textContent || '').trim();
+    if (label) parts.push(label.slice(0, 80));
+  }
+
+  var expanded = null;
+  if (__X__ >= 0 && __Y__ >= 0) {
+    var chrome = Math.max(0, window.outerHeight - window.innerHeight);
+    var hit = document.elementFromPoint(__X__ - window.screenX, __Y__ - window.screenY - chrome);
+    var n = hit;
+    for (var j = 0; j < 8 && n; j++) {
+      if (n.nodeType !== 1) { n = n.parentElement; continue; }
+      var attr = n.getAttribute && n.getAttribute('aria-expanded');
+      if (attr === 'true') { expanded = true; break; }
+      if (attr === 'false') { expanded = false; break; }
+      if (n.tagName === 'SELECT') { expanded = n.size > 1; break; }
+      var list = n.querySelector ? n.querySelector('.choices__list--dropdown') : null;
+      if (list) { expanded = list.classList.contains('is-active'); break; }
+      n = n.parentElement;
+    }
+  }
+
+  return {options: parts.join(' | '), expanded: expanded};
 })()"#;

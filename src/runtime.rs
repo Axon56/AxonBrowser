@@ -40,6 +40,22 @@ struct HeadlessSession {
 fn start_session() -> Result<HeadlessSession> {
     ensure_commands(["Xvfb", "xdpyinfo", "dbus-launch", "dbus-send"])?;
 
+    // A second session must never be started while a browser is running. The
+    // browser is registered with the first session's accessibility bus, so a new
+    // session means a new bus, and every lookup on it finds nothing: the window is
+    // plainly on screen while the tree comes back empty. Refusing is the only safe
+    // answer, and saying why is what makes it fixable.
+    if browser_is_running() {
+        bail!(
+            "a browser is already running but its headless session could not be reused, and starting a second session would leave that browser unregistered with the accessibility bus; restart the browser"
+        );
+    }
+
+    // A duplicate stack from an earlier session would be joined rather than
+    // replaced, so it is collapsed first. This is safe here: no browser is running
+    // in this session yet, so nothing is registered with the stack being removed.
+    collapse_duplicate_registries();
+
     let dir = session_dir()?;
     for display_number in DISPLAY_CANDIDATES {
         let display = format!(":{display_number}");
@@ -161,6 +177,25 @@ fn has_working_display(env_override: Option<&BTreeMap<String, String>>) -> bool 
         return false;
     };
 
+    // Probe more than once. A single `xdpyinfo` can fail spuriously while Xvfb is
+    // busy, and this answer decides whether the whole session is torn down: a
+    // false negative kills Xvfb, the session bus, and the accessibility bus under
+    // a browser that is still running, and that browser never re-registers. The
+    // tree then stays empty for the rest of its life. A couple of retries cost
+    // milliseconds and remove that failure mode.
+    for attempt in 0..3u32 {
+        if display_probe_succeeds(&display, env_override) {
+            return true;
+        }
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    false
+}
+
+/// One `xdpyinfo` probe against a display.
+fn display_probe_succeeds(display: &str, env_override: Option<&BTreeMap<String, String>>) -> bool {
     let mut command = Command::new("xdpyinfo");
     command.arg("-display").arg(display);
     if let Some(env) = env_override {
@@ -242,6 +277,16 @@ fn reclaim_display(display_number: u16) -> Result<()> {
 }
 
 fn cleanup_session_outputs(dir: &Path) -> Result<()> {
+    // Tearing the session down while a browser is running is never right: the
+    // browser would be left on a dead display, holding a connection to a bus that
+    // no longer exists, and it never re-registers. The session is kept instead.
+    if browser_is_running() {
+        eprintln!(
+            "keeping the headless session up: a browser is running in it, and restarting the session would orphan that browser"
+        );
+        return Ok(());
+    }
+
     for name in ["xvfb.pid", "atspi-bus.pid"] {
         let path = dir.join(name);
         if path.exists() {
@@ -350,22 +395,8 @@ fn warm_accessibility_bus(env: &BTreeMap<String, String>, dir: &Path) -> Result<
     enable_accessibility_flags(env)?;
 
     // Sending to `org.a11y.Bus` activates the bus launcher, which starts a
-    // registry of its own. Starting a second one unconditionally produced two
-    // registries competing for the same well-known name, and whichever lost was
-    // the one the browser had registered with -- after which every call came back
-    // empty. A registry is therefore only started when the bus did not provide
-    // one, which is the case on a bus without activation configured.
-    if !accessibility_registry_is_running()
-        && let Some(registryd) = accessibility_registry_binary()
-    {
-        let pid = spawn_logged(
-            &registryd,
-            &["--use-gnome-session"],
-            &dir.join("atspi-bus.log"),
-            Some(env),
-        )?;
-        write_pid_file(&dir.join("atspi-bus.pid"), pid)?;
-    }
+    // registry of its own, so a second one is only started when nothing appeared.
+    ensure_registry_running(env, dir)?;
 
     wait_for_accessibility_bus(env)
 }
@@ -496,18 +527,8 @@ pub fn ensure_accessibility_stack() -> Result<()> {
     }
 
     enable_accessibility_flags(&env)?;
-    if !accessibility_registry_is_running()
-        && let Some(registryd) = accessibility_registry_binary()
-    {
-        let pid = spawn_logged(
-            &registryd,
-            &["--use-gnome-session"],
-            &dir.join("atspi-bus.log"),
-            Some(&env),
-        )?;
-        write_pid_file(&dir.join("atspi-bus.pid"), pid)?;
-        wait_for_accessibility_bus_within(&env, REPAIR_WAIT_TIMEOUT)?;
-    }
+    ensure_registry_running(&env, &dir)?;
+    wait_for_accessibility_bus_within(&env, REPAIR_WAIT_TIMEOUT)?;
 
     Ok(())
 }
@@ -528,6 +549,54 @@ fn accessibility_registry_is_running() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// Whether a browser that may be registered with the accessibility bus is up.
+///
+/// Matched by process name, because the point is to avoid pulling the bus out
+/// from under *any* running browser: one that is already up has connected once
+/// and will not connect again, whether it was launched by this tool or by hand.
+fn browser_is_running() -> bool {
+    ["chrome", "chromium", "msedge", "firefox", "camoufox"]
+        .iter()
+        .any(|name| {
+            Command::new("pgrep")
+                .args(["-x", name])
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+}
+
+/// Wait briefly for a registry to appear, then start one only if none did.
+///
+/// Enabling the accessibility flags is what makes the session bus activate the
+/// bus launcher, and the launcher starts a registry -- but asynchronously. Asking
+/// immediately whether a registry is running answers "no" while the real one is
+/// still starting, and starting a second one then gives two registries competing
+/// for the same well-known name. Whichever the browser did not register with wins
+/// some calls, and the tree comes back empty. Waiting first closes that window.
+fn ensure_registry_running(env: &BTreeMap<String, String>, dir: &Path) -> Result<()> {
+    for _ in 0..20 {
+        if accessibility_registry_is_running() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    // Nothing was activated, so this bus has no at-spi2 service configured and
+    // the registry has to be started directly.
+    let Some(registryd) = accessibility_registry_binary() else {
+        return Ok(());
+    };
+    let pid = spawn_logged(
+        &registryd,
+        &["--use-gnome-session"],
+        &dir.join("atspi-bus.log"),
+        Some(env),
+    )?;
+    write_pid_file(&dir.join("atspi-bus.pid"), pid)?;
+    Ok(())
 }
 
 /// Whether the accessibility stack is already up and must be left alone.
@@ -560,30 +629,71 @@ fn accessibility_stack_is_up(env: &BTreeMap<String, String>) -> bool {
 /// registry the browser is actually talking to is kept, which is the oldest one
 /// still running, and any later duplicate is stopped.
 fn collapse_duplicate_registries() {
-    let Ok(output) = Command::new("pgrep")
-        .args(["-af", "at-spi2-registryd"])
-        .output()
-    else {
+    // Every part of the stack is collapsed together, not just the registry. Each
+    // accessibility bus runs its own launcher, its own dbus-daemon, and its own
+    // registry; killing only the extra registry leaves the extra launcher alive,
+    // and the bus it serves starts a fresh registry on the next request. The
+    // oldest instance of each is kept, because that is the stack a browser
+    // launched earlier registered with.
+    let mut stopped = Vec::new();
+    for pattern in [
+        "at-spi2-registryd",
+        "at-spi-bus-launcher",
+        "dbus-daemon --config-file=/usr/share/defaults/at-spi2/accessibility.conf",
+    ] {
+        let mut pids = pids_by_start_time(pattern);
+        if pids.len() < 2 {
+            continue;
+        }
+        stopped.extend(pids.split_off(1));
+    }
+
+    if stopped.is_empty() {
         return;
+    }
+    for pid in &stopped {
+        let _ = terminate_pid(*pid);
+    }
+    // Said out loud because a duplicate stack splits the browser and the tool
+    // across two buses, and a caller seeing odd empty-tree failures deserves to
+    // know one was found and removed.
+    eprintln!(
+        "stopped {} duplicate accessibility process(es) ({:?}) so the browser and this tool share one bus",
+        stopped.len(),
+        stopped
+    );
+}
+
+/// Pids whose command line matches a pattern, oldest first.
+///
+/// Start time comes from the proc filesystem, which is what makes "oldest" a fact
+/// rather than an assumption: pid order is not start order once pids wrap around,
+/// and keeping the wrong instance would break the browser's registration instead
+/// of repairing it.
+fn pids_by_start_time(pattern: &str) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep").args(["-f", pattern]).output() else {
+        return Vec::new();
     };
     if !output.status.success() {
-        return;
+        return Vec::new();
     }
 
-    let mut pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+    let mut pids: Vec<(u64, u32)> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter_map(|pid| process_start_time(pid).map(|start| (start, pid)))
         .collect();
-    if pids.len() < 2 {
-        return;
-    }
-
-    // Keep the lowest pid: the first registry started is the one a browser that
-    // launched earlier would have registered with.
     pids.sort_unstable();
-    for pid in pids.into_iter().skip(1) {
-        let _ = terminate_pid(pid);
-    }
+    pids.into_iter().map(|(_, pid)| pid).collect()
+}
+
+/// A process's start time in clock ticks since boot, read from the proc filesystem.
+fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesised and may itself contain spaces, so the
+    // fields are counted from after the closing parenthesis.
+    let after_name = stat.rsplit_once(')')?.1;
+    after_name.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// Turn the accessibility flags on for the current session bus.
@@ -686,6 +796,20 @@ fn ping_dbus_address(env: &BTreeMap<String, String>, address: &str) -> bool {
 }
 
 fn terminate_accessibility_processes() -> Result<()> {
+    // Never take the accessibility stack down while a browser is running. A
+    // browser connects to the bus once, at startup, and never re-registers: if
+    // the bus or its registry disappears underneath it, the window stays on
+    // screen but its tree is gone for the life of that process, and every later
+    // command fails with "no accessible application or window matched". Reclaiming
+    // a display is not worth orphaning a running browser, so the request is
+    // refused and reported instead.
+    if browser_is_running() {
+        eprintln!(
+            "keeping the accessibility bus up: a browser is running and would not re-register if the bus were restarted"
+        );
+        return Ok(());
+    }
+
     for pattern in [
         "dbus-daemon --config-file=/usr/share/defaults/at-spi2/accessibility.conf",
         "at-spi2-registryd --use-gnome-session",

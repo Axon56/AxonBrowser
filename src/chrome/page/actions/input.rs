@@ -11,6 +11,24 @@ use crate::{
 use super::{physical, target::PageActionTarget};
 
 pub async fn type_text(scope: &PageScope, raw_selectors: &[String], text: &str) -> Result<String> {
+    // The accessibility bus resolves each application to a unique name, and that
+    // name changes whenever a browser restarts its accessibility bridge -- which
+    // happens while a page is re-rendering. A call can then fail with
+    // ServiceUnknown even though everything is fine, so the whole action is
+    // retried rather than reported as a failure of the page.
+    let scope = scope.clone();
+    let raw_selectors = raw_selectors.to_vec();
+    let text = text.to_string();
+    crate::chrome::retry::with_transient_retry(|| {
+        let scope = scope.clone();
+        let raw_selectors = raw_selectors.clone();
+        let text = text.clone();
+        async move { type_text_once(&scope, &raw_selectors, &text).await }
+    })
+    .await
+}
+
+async fn type_text_once(scope: &PageScope, raw_selectors: &[String], text: &str) -> Result<String> {
     let target = PageActionTarget::resolve(scope, raw_selectors).await?;
 
     let mut notes = Vec::new();

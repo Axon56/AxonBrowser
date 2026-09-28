@@ -640,7 +640,9 @@ pub struct ChromePageSelectOptionArgs {
     /// Option label to select.
     pub option: String,
 
-    /// Zero-based match index when several options share the label.
+    /// Zero-based index of the control to act on when the selector matches
+    /// several. The index never refers to the option: a form with two combo
+    /// boxes needs the second control, not the second option with that label.
     #[arg(long)]
     pub nth: Option<usize>,
 }

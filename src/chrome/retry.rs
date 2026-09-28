@@ -74,6 +74,17 @@ pub fn is_transient_accessibility_error(message: &str) -> bool {
         "org.freedesktop.dbus.error.noreply",
         "org.freedesktop.dbus.error.disconnected",
         "org.freedesktop.dbus.error.servicename",
+        // The accessibility bus resolves each application to a unique name, and
+        // that name disappears whenever an application restarts its accessibility
+        // bridge -- which a browser does when a page is re-rendered. The call then
+        // fails with ServiceUnknown even though the application is fine, so it is
+        // a transient condition and must be retried rather than reported.
+        "org.freedesktop.dbus.error.serviceunknown",
+        "was not provided by any .service files",
+        // The unique-name form of the same failure: `the name :1.27 was not
+        // provided by any .service files`.
+        "org.freedesktop.dbus.error.unknownobject",
+        "org.freedesktop.dbus.error.unknownmethod",
         "the name :1.",
         "timed out waiting for reply",
         // One prefix covers every browser: the query text after it changed when
