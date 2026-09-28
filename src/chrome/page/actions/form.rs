@@ -440,12 +440,12 @@ async fn option_selected(target: &PageActionTarget, option: &str) -> bool {
     // form both airport combos are unnamed, so the page lookups return nothing even
     // though the selection worked.
     if let Ok(Some(value)) = crate::live_access::read_text(&target.node).await
-        && value.to_ascii_lowercase().contains(&option)
+        && option_matches(&value, &option)
     {
         return true;
     }
     if let Some(value) = crate::inspect::node_text(&target.node).await
-        && value.to_ascii_lowercase().contains(&option)
+        && option_matches(&value, &option)
     {
         return true;
     }
@@ -472,14 +472,14 @@ async fn option_confirmed_by_page(target: &PageActionTarget, option: &str) -> bo
         .node
         .name
         .as_deref()
-        .map(|name| name.to_ascii_lowercase().contains(option))
+        .map(|name| option_matches(name, option))
         .unwrap_or(false)
     {
         return true;
     }
 
     if let Some(value) = crate::dom::control_value(&target.node).await
-        && value.to_ascii_lowercase().contains(option)
+        && option_matches(&value, option)
     {
         return true;
     }
@@ -487,7 +487,7 @@ async fn option_confirmed_by_page(target: &PageActionTarget, option: &str) -> bo
     if let Ok((screen_x, screen_y)) = crate::inspect::clickable_point_stable(&target.node).await
         && let Some(value) =
             crate::dom::value_at_point(crate::dom::current_flavor(), screen_x, screen_y).await
-        && value.to_ascii_lowercase().contains(option)
+        && option_matches(&value, option)
     {
         return true;
     }
@@ -524,12 +524,44 @@ async fn control_shows(
 /// "Lagos LOS" where the caller says "Lagos" -- so a case-insensitive containment in
 /// either direction is accepted.
 fn option_matches(candidate: &str, wanted: &str) -> bool {
-    let candidate = candidate.trim().to_ascii_lowercase();
-    let wanted = wanted.trim().to_ascii_lowercase();
-    if wanted.is_empty() {
+    let candidate = normalize_for_option(candidate);
+    let wanted = normalize_for_option(wanted);
+    // Both sides must carry something. An empty candidate contains every string, so
+    // without this an unreadable value would match any option and a selection that
+    // never happened would be reported as done.
+    if candidate.is_empty() || wanted.is_empty() {
         return false;
     }
-    candidate == wanted || candidate.contains(&wanted) || wanted.contains(&candidate)
+    if candidate == wanted || candidate.contains(&wanted) || wanted.contains(&candidate) {
+        return true;
+    }
+
+    // A control often stores a code while showing a label: a real booking form keeps
+    // the airport as "LOS" and displays "Lagos LOS", so comparing the two strings
+    // directly never matches and a selection that worked is reported as a failure.
+    // A shared token is accepted instead, which is what makes the code and the label
+    // recognise each other. Tokens shorter than three characters are ignored so a
+    // stray pair of letters cannot make two unrelated options look equal.
+    const MIN_TOKEN: usize = 3;
+    wanted
+        .split_whitespace()
+        .filter(|token| token.len() >= MIN_TOKEN)
+        .any(|token| candidate.split_whitespace().any(|part| part == token))
+}
+
+/// Lowercase, strip the object-replacement character, and collapse whitespace.
+///
+/// The accessibility text interface renders a rich element as U+FFFC, so a control
+/// that holds a styled label reads back as that placeholder and never matches the
+/// option. Removing it is what lets the real text be compared.
+fn normalize_for_option(value: &str) -> String {
+    value
+        .replace('\u{fffc}', " ")
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whatever the control currently reports as its value, for error reporting.
@@ -631,5 +663,46 @@ fn attach_notes(summary: String, notes: &[String]) -> String {
         summary
     } else {
         format!("{} | {}", summary, notes.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_for_option, option_matches};
+
+    #[test]
+    fn a_code_and_a_label_recognise_each_other() {
+        // A real booking form stores the airport as "LOS" while the option reads
+        // "Lagos LOS", so comparing the two strings directly never matched and a
+        // selection that worked was reported as a failure.
+        assert!(option_matches("LOS", "Lagos LOS"));
+        assert!(option_matches("Lagos LOS", "LOS"));
+        assert!(option_matches("Lagos LOS", "Lagos"));
+    }
+
+    #[test]
+    fn unrelated_options_do_not_match() {
+        assert!(!option_matches("Abuja ABV", "Lagos LOS"));
+        assert!(!option_matches("2 Adults (12yrs+)", "Lagos LOS"));
+    }
+
+    #[test]
+    fn the_object_replacement_character_is_stripped() {
+        // The accessibility text interface renders a rich element as U+FFFC, so a
+        // control holding a styled label reads back as that placeholder.
+        assert_eq!(normalize_for_option("\u{fffc}"), "");
+        // A value that is nothing but the placeholder carries no information, so it
+        // is not evidence of a selection. Treating it as one would be the false
+        // positive this whole path exists to avoid.
+        assert!(!option_matches("\u{fffc}", "Lagos LOS"));
+        // Real text beside the placeholder is still compared.
+        assert!(option_matches("\u{fffc} Lagos LOS", "Lagos LOS"));
+    }
+
+    #[test]
+    fn short_tokens_alone_do_not_match() {
+        // Two-character fragments are ignored so unrelated options cannot be
+        // considered equal by coincidence.
+        assert!(!option_matches("AB", "Los Angeles LAX"));
     }
 }

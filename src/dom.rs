@@ -356,38 +356,73 @@ pub async fn value_at_point(flavor: Flavor, screen_x: i32, screen_y: i32) -> Opt
 /// Report what the control under a point currently shows.
 ///
 /// The point is converted from screen to viewport coordinates first, because the
-/// page area starts below the browser chrome. The element under the point is read
-/// directly, and when it is a wrapper its own text is used, which is where a
-/// custom dropdown keeps the chosen label.
+/// page area starts below the browser chrome. The control is located by geometry
+/// rather than by hit-testing: a form field is often covered by a sticky header, and
+/// a hit test would then read the header instead of the field. The innermost form
+/// control whose own rectangle contains the point is the one that answers.
 const VALUE_AT_POINT_JS: &str = r#"(function(){
   var chrome = Math.max(0, window.outerHeight - window.innerHeight);
   var x = __X__ - window.screenX;
   var y = __Y__ - window.screenY - chrome;
-  var el = document.elementFromPoint(x, y);
+
+  // Geometry first: the smallest control whose box contains the point. Hit-testing
+  // would return a sticky header when the field sits underneath one, which is
+  // exactly the case this has to read through.
+  var controls = document.querySelectorAll('select, input, textarea, [role=combobox], .choices');
+  var best = null, bestArea = Infinity;
+  for (var c = 0; c < controls.length; c++) {
+    var box = controls[c].getBoundingClientRect();
+    if (box.width < 2 || box.height < 2) continue;
+    if (x < box.left - 2 || x > box.right + 2) continue;
+    if (y < box.top - 2 || y > box.bottom + 2) continue;
+    var area = box.width * box.height;
+    if (area < bestArea) {
+      bestArea = area;
+      best = controls[c];
+    }
+  }
+  var el = best || document.elementFromPoint(x, y);
   if (!el) return null;
 
-  var parts = [];
-  var n = el;
-  for (var i = 0; i < 4 && n; i++) {
-    if (n.nodeType !== 1) { n = n.parentElement; continue; }
-    if (n.value !== undefined && n.value !== null && String(n.value).trim() !== '') {
-      parts.push(String(n.value).trim());
+  function read(node, into) {
+    if (!node || node.nodeType !== 1) return;
+    // A native control reports its own value, and the selected option's text and
+    // value, because a page often stores a code while displaying a label: an airport
+    // control holds "LOS" and shows "Lagos LOS", and matching only one of the two
+    // would report a working selection as failed.
+    if (node.value !== undefined && node.value !== null && String(node.value).trim() !== '') {
+      into.push(String(node.value).trim());
     }
-    if (n.selectedIndex >= 0 && n.options && n.options[n.selectedIndex]) {
-      parts.push((n.options[n.selectedIndex].textContent || '').trim());
+    if (node.selectedIndex >= 0 && node.options && node.options[node.selectedIndex]) {
+      var opt = node.options[node.selectedIndex];
+      if (opt.textContent) into.push(opt.textContent.trim());
+      if (opt.value) into.push(String(opt.value).trim());
     }
-    // The element's own text, but only when it holds no further controls. A wrapper
-    // around a closed dropdown would otherwise contribute the labels of options that
-    // are not on screen, and a check that reads them reports a selection that never
-    // happened.
-    var nested = n.querySelector && n.querySelector('[role=option], li, select, input, textarea, [role=listbox]');
-    if (!nested) {
-      var text = (n.textContent || '').trim();
-      if (text && text.length < 200) parts.push(text);
+    // The visible chosen label, which is where a custom widget keeps it.
+    var chosen = node.querySelector && node.querySelector(
+      '.choices__list--single .choices__item, [data-value], .select2-selection__rendered');
+    if (chosen && chosen.textContent && chosen.textContent.trim()) {
+      into.push(chosen.textContent.trim());
     }
-    if (parts.length) break;
-    n = n.parentElement;
   }
+
+  var parts = [];
+  read(el, parts);
+  // A wrapper holds the real control inside it, so its descendants are read too.
+  var inner = el.querySelectorAll ? el.querySelectorAll('select, input, [role=combobox], .choices__item--selectable') : [];
+  for (var k = 0; k < inner.length && k < 8; k++) {
+    read(inner[k], parts);
+  }
+
+  if (!parts.length) {
+    // Nothing carried a value, so the element's own text is the last resort -- but
+    // only when it holds no further options, since a wrapper around a closed list
+    // would otherwise contribute labels that are not on screen.
+    var nested = el.querySelector && el.querySelector('[role=option], li, select, textarea, [role=listbox]');
+    var text = nested ? '' : (el.textContent || '').trim();
+    if (text && text.length < 200) parts.push(text);
+  }
+
   return parts.length ? parts.join(' | ') : null;
 })()"#;
 
